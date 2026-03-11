@@ -32,7 +32,7 @@
  *   volume_step: 2               # percent (default: 2)
  */
 
-const CARD_VERSION = '0.1.1';
+const CARD_VERSION = '0.1.2';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Button definitions
@@ -631,7 +631,10 @@ class CoverMediaCard extends HTMLElement {
   }
 
   static getConfigElement() { return document.createElement('cover-media-card-editor'); }
-  static getStubConfig()    { return { players: [], buttons: [...DEFAULT_BUTTONS] }; }
+  static getStubConfig(hass) {
+    const player = Object.keys(hass.states).find(e => e.startsWith('media_player.'));
+    return { players: player ? [player] : [], buttons: [...DEFAULT_BUTTONS] };
+  }
 }
 
 customElements.define('cover-media-card', CoverMediaCard);
@@ -641,7 +644,7 @@ window.customCards.push({
   type:        'cover-media-card',
   name:        'Cover Media Card',
   description: 'A cover art media player card with auto-hiding controls and multi-player switching.',
-  preview:     false,
+  preview:     true,
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
