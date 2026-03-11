@@ -5,8 +5,6 @@
 
 A cover art media player card for Home Assistant Lovelace. Displays cover art full-bleed with auto-hiding controls, multi-player switching, and a fully GUI-configurable button row.
 
-> ℹ️ **Screenshot coming soon**
-
 ---
 
 ## Features
