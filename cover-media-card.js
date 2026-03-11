@@ -32,7 +32,7 @@
  *   volume_step: 2               # percent (default: 2)
  */
 
-const CARD_VERSION = '0.1.0';
+const CARD_VERSION = '0.1.1';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Button definitions
@@ -635,6 +635,14 @@ class CoverMediaCard extends HTMLElement {
 }
 
 customElements.define('cover-media-card', CoverMediaCard);
+
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type:        'cover-media-card',
+  name:        'Cover Media Card',
+  description: 'A cover art media player card with auto-hiding controls and multi-player switching.',
+  preview:     false,
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Editor
