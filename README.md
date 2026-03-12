@@ -2,6 +2,8 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge)](https://github.com/hacs/integration)
 
 # Cover Media Card
+> [!NOTE]
+> This card is vibe coded
 
 A cover art media player card for Home Assistant Lovelace. Displays cover art full-bleed with auto-hiding controls, multi-player switching, and a fully GUI-configurable button row.
 
