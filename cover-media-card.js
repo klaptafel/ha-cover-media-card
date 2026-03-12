@@ -32,7 +32,7 @@
  *   volume_step: 2               # percent (default: 2)
  */
 
-const CARD_VERSION = '0.1.3';
+const CARD_VERSION = '0.1.4';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Button definitions
