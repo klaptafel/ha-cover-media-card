@@ -32,7 +32,7 @@
  *   volume_step: 2               # percent (default: 2)
  */
 
-const CARD_VERSION = '0.1.2';
+const CARD_VERSION = '0.1.3';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Button definitions
@@ -313,6 +313,7 @@ class CoverMediaCard extends HTMLElement {
         { detail: { entityId: action.entity || this._player }, bubbles: true, composed: true }));
     } else if (type === 'navigate' && action.navigation_path) {
       history.pushState(null, '', action.navigation_path);
+      window.dispatchEvent(new CustomEvent('location-changed', { bubbles: true }));
     } else if (type === 'url' && action.url_path) {
       window.open(action.url_path, '_blank');
     }
