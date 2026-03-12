@@ -24,23 +24,14 @@ A cover art media player card for Home Assistant Lovelace. Displays cover art fu
 
 ## Installation
 
-### HACS (recommended)
+This card is available via [HACS](https://hacs.xyz/).
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=klaptafel&repository=ha-cover-media-card&category=dashboard)
 
 1. Go to **HACS** in your Home Assistant.
 2. Click the three-dot menu in the top right → **Custom repositories**.
 3. Enter `https://github.com/klaptafel/cover-media-card` and select category **Dashboard**, then click **Add**.
 4. Find **Cover Media Card** in the list and click **Download**.
-5. Hard refresh your browser (`Ctrl+Shift+R`).
-
-### Manual
-
-1. Download `cover-media-card.js` from the [latest release](../../releases/latest).
-2. Copy it to `/config/www/cover-media-card.js`.
-3. Go to **Settings → Dashboards → Resources** and add:
-   ```
-   /local/cover-media-card.js
-   ```
-4. Hard refresh your browser (`Ctrl+Shift+R`).
 
 ---
 
