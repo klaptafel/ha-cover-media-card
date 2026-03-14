@@ -4,35 +4,85 @@
  * Minimal config:
  *   type: custom:cover-media-card
  *   players:
- *     - media_player.name
+ *     - media_player.living_room
  *
  * Full config:
  *   type: custom:cover-media-card
  *   players:
- *     - entity: media_player.woonkamer
- *       name: Woonkamer          # optional display name
- *     - entity: media_player.appletv
- *   buttons:                     # default: [play_pause, power]
+ *     - entity: media_player.living_room
+ *       name: Living Room
+ *       group_members:
+ *         - media_player.kitchen
+ *         - media_player.bedroom
+ *     - entity: media_player.kitchen
+ *       name: Kitchen
+ *       visibility:                # hide pill based on conditions
+ *         - condition: state
+ *           entity: media_player.kitchen
+ *           state: playing
+ *     - entity: media_player.bedroom
+ *       name: Bedroom
+ *       buttons:                   # per-player button override
+ *         - play_pause
+ *         - power
+ *   buttons:                       # default: [play_pause, power]
  *     - play_pause
  *     - previous
  *     - next
- *     - power
- *     - volume_up
  *     - volume_down
+ *     - volume_up
  *     - shuffle
  *     - repeat
- *     - icon: mdi:information-outline  # custom button
- *       label: More info
+ *     - power
+ *     - group
+ *     - icon: mdi:netflix           # custom button
+ *       label: Open Netflix
  *       tap_action:
- *         action: more-info
- *   aspect_ratio: auto           # auto | square  (default: auto)
- *   auto_hide: true              # default: true
- *   show_duration: 10            # seconds (default: 10)
- *   show_on_change: true          # default: true
- *   volume_step: 2               # percent (default: 2)
+ *         action: perform-action
+ *         perform_action: media_player.select_source
+ *         data:
+ *           source: Netflix
+ *         target:
+ *           entity_id: media_player.living_room
+ *       visibility:                # hide button based on conditions
+ *         - condition: state
+ *           entity: media_player.living_room
+ *           state_not: "off"
+ *   aspect_ratio: auto             # auto | square  (default: auto)
+ *   auto_hide: true                # default: true
+ *   show_duration: 10              # seconds (default: 10)
+ *   show_on_change: true           # default: true
+ *   volume_step: 2                 # percent (default: 2)
+ *
+ * ─── Visibility conditions ───────────────────────────────────────────────────
+ *
+ * Supported on both players (pill) and buttons. Evaluated locally — no HA API
+ * calls, no polling. Reacts instantly to state changes.
+ *
+ * Multiple conditions = all must be true (implicit AND):
+ *   visibility:
+ *     - condition: state
+ *       entity: switch.tv
+ *       state: "on"
+ *     - condition: numeric_state
+ *       entity: sensor.volume
+ *       above: 10
+ *
+ * state          entity, state (single or list), or state_not
+ * numeric_state  entity, above / below, optional: attribute
+ * attribute      entity, attribute, value
+ * and            conditions: [...]  — all must be true
+ * or             conditions: [...]  — at least one must be true
+ *
+ * Note: time-based conditions are not supported. Use a template binary_sensor
+ * in HA for time-based visibility.
  */
 
-const CARD_VERSION = '0.1.4';
+const CARD_VERSION = '0.2.0';
+
+const LONG_PRESS_MS   = 500;   // long press → more-info
+const PENDING_MS      = 2000;  // optimistic toggle pending window
+const GROUP_WATCHDOG_MS = 8000; // group operation timeout
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Button definitions
@@ -50,75 +100,88 @@ const F = {
   PLAY:         16384,
   SHUFFLE:      32768,
   REPEAT:       262144,
+  GROUPING:     524288,
 };
+
+const mkIcon = (mdi) => `<ha-icon icon="${mdi}"></ha-icon>`;
 
 const BUTTON_DEFS = {
   previous: {
-    icon: () => `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="3" width="3" height="18" rx="1"/><polygon points="19,21 9,12 19,3"/></svg>`,
+    icon: () => mkIcon('mdi:skip-previous'),
     label: 'Previous', feature: F.PREV,
   },
   play_pause: {
-    icon: (st) => st === 'playing'
-      ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>`
-      : `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>`,
+    icon: (st) => mkIcon(st === 'playing' ? 'mdi:pause' : 'mdi:play'),
     label: 'Play/Pause', isPrimary: true, feature: F.PLAY | F.PAUSE,
   },
   next: {
-    icon: () => `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 15,12 5,21"/><rect x="16" y="3" width="3" height="18" rx="1"/></svg>`,
+    icon: () => mkIcon('mdi:skip-next'),
     label: 'Next', feature: F.NEXT,
   },
   shuffle: {
-    icon: () => `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>`,
+    icon: () => mkIcon('mdi:shuffle'),
     label: 'Shuffle', toggleAttr: 'shuffle', feature: F.SHUFFLE,
   },
   repeat: {
-    icon: (v) => v === 'one'
-      ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/><text x="12" y="14.5" text-anchor="middle" font-size="7" font-weight="bold" fill="currentColor">1</text></svg>`
-      : `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>`,
+    icon: (v) => mkIcon(v === 'one' ? 'mdi:repeat-once' : 'mdi:repeat'),
     label: 'Repeat', toggleAttr: 'repeat', feature: F.REPEAT,
   },
   volume_up: {
-    icon: () => `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>`,
+    icon: () => mkIcon('mdi:volume-high'),
     label: 'Volume up', feature: F.VOLUME_SET | F.VOLUME_STEP,
   },
   volume_down: {
-    icon: () => `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M18.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM5 9v6h4l5 5V4L9 9H5z"/></svg>`,
+    icon: () => mkIcon('mdi:volume-medium'),
     label: 'Volume down', feature: F.VOLUME_SET | F.VOLUME_STEP,
   },
   power: {
-    icon: () => `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42A6.92 6.92 0 0 1 19 12c0 3.87-3.13 7-7 7A7 7 0 0 1 5 12c0-2.28 1.09-4.3 2.58-5.42L6.17 5.17A8.932 8.932 0 0 0 3 12a9 9 0 0 0 18 0c0-2.74-1.23-5.18-3.17-6.83z"/></svg>`,
+    icon: () => mkIcon('mdi:power'),
     label: 'Power', feature: F.TURN_ON | F.TURN_OFF,
+  },
+  group: {
+    icon: () => mkIcon('mdi:speaker-multiple'),
+    label: 'Group', feature: F.GROUPING,
   },
 };
 
 const DEFAULT_BUTTONS = ['play_pause', 'power'];
 
 // Canonical order for builtin buttons (used for positioning disabled placeholders)
-const BUILTIN_KEYS_ORDERED = ['volume_down','volume_up','previous','play_pause','next','shuffle','repeat','power'];
+const BUILTIN_KEYS_ORDERED = ['volume_down','volume_up','previous','play_pause','next','shuffle','repeat','power','group'];
 
 // Shared config normalisation (used by both card and editor)
-function _normalizeConfig(config) {
-  let buttons = config.buttons || DEFAULT_BUTTONS;
-
-  // Ensure every builtin key is represented — missing ones become {_disabled:key}
-  // inserted at their natural BUILTIN_KEYS position relative to existing builtins.
+function _normalizeButtons(buttons) {
   const presentKeys = buttons
-    .map(b => typeof b === 'string' ? b : b?._disabled)
+    .map(b => typeof b === 'string' ? b : (b?.button || b?._disabled))
     .filter(Boolean);
   const missingKeys = BUILTIN_KEYS_ORDERED.filter(k => !presentKeys.includes(k));
   missingKeys.forEach(key => {
     const naturalIdx = BUILTIN_KEYS_ORDERED.indexOf(key);
     let insertAt = buttons.findIndex(
-      b => (typeof b === 'string' || b?._disabled) &&
-           BUILTIN_KEYS_ORDERED.indexOf(b._disabled ?? b) > naturalIdx
+      b => (typeof b === 'string' || b?._disabled || b?.button) &&
+           BUILTIN_KEYS_ORDERED.indexOf(b._disabled ?? b?.button ?? b) > naturalIdx
     );
     if (insertAt === -1) insertAt = buttons.length;
     buttons = [...buttons.slice(0, insertAt), { _disabled: key }, ...buttons.slice(insertAt)];
   });
+  return buttons;
+}
+
+function _normalizeConfig(config) {
+  let buttons = _normalizeButtons([...(config.buttons || DEFAULT_BUTTONS)]);
 
   const players = (config.players || [])
     .map(p => typeof p === 'string' ? { entity: p } : p)
-    .filter(p => p?.entity);
+    .filter(p => p?.entity)
+    .map(p => p.buttons ? { ...p, buttons: _normalizeButtons([...p.buttons]) } : p);
+
+  // Auto-enable group button if any player has group_members configured,
+  // unless the user explicitly disabled it in their original config.
+  const hasGroupMembers   = players.some(p => p.group_members?.length);
+  const userDisabledGroup = (config.buttons || []).some(b => b?._disabled === 'group');
+  if (hasGroupMembers && !userDisabledGroup) {
+    buttons = buttons.map(b => b?._disabled === 'group' ? 'group' : b);
+  }
 
   return { show_duration: 10, auto_hide: true, show_on_change: true,
     aspect_ratio: 'auto', volume_step: 2, ...config, players, buttons };
@@ -128,30 +191,69 @@ class CoverMediaCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
-    this._config      = {};
-    this._hass        = null;
-    this._playerIdx   = 0;
-    this._ctrlVis     = false;
-    this._hideTimer   = null;
-    this._lastTitle   = null;
-    this._rendered    = false;
-    this._lastFeats   = null;
-    this._lastIsOff   = null;
-    this._lastActive  = false;
-    this._volTimer    = null;
-    this._showVol     = false;
-    this._pending     = {};
+    this._config             = {};
+    this._hass               = null;
+    this._playerIdx          = 0;
+    this._ctrlVis            = false;
+    this._rendered           = false;
+    this._pressTimer         = null;
+    this._hideTimer          = null;
+    this._volTimer           = null;
+    this._groupTimer         = null;
+    this._showVol            = false;
+    this._statusPriority     = 0;
+    this._groupExpect        = null;
+    this._groupAction        = null;
+    this._lastActive         = false;
+    this._lastTitle          = null;
+    this._lastFeats          = null;
+    this._lastIsOff          = null;
+    this._lastIsUnavail      = null;
+    this._lastGrouped        = null;
+    this._lastPillKey        = null;
+    this._lastIconIdx        = -1;
+    this._lastArtBase        = '';
+    this._lastHasArt         = null;
+    this._lastTrackKey       = null;
+    this._lastBtnStateKey    = null;
+    this._pending            = {};
+    this._visibleCache       = new Map();
+    this._playerVisibleCache = new Map();
+    this._lastState          = null;
   }
 
   // ── Config ──────────────────────────────────────────────────────────────────
 
   setConfig(config) {
-    this._config = _normalizeConfig(config);
+    this._config    = _normalizeConfig(config);
+    this._playerIdx = Math.min(this._playerIdx, Math.max(0, this._config.players.length - 1));
     this._render();
   }
 
   set hass(hass) {
     this._hass = hass;
+    const s    = hass?.states[this._player];
+    let stKey = `${s?.state}|${s?.attributes?.app_name}|${s?.attributes?.media_title}`;
+    // Watch all entities referenced in any visibility condition
+    const _addEntities = (conds) => {
+      if (!conds) return;
+      const arr = Array.isArray(conds) ? conds : [conds];
+      arr.forEach(c => {
+        if (c?.entity) stKey += `|${c.entity}:${hass?.states[c.entity]?.state}`;
+        if (c?.conditions) _addEntities(c.conditions);
+      });
+    };
+    // Player-level visibility conditions
+    this._config.players?.forEach(p => _addEntities(p.visibility));
+    // Button visibility conditions — per-player overrides first, then global once
+    this._config.players?.forEach(p => {
+      if (p.buttons) p.buttons.forEach(b => _addEntities(b?.visibility));
+    });
+    this._config.buttons?.forEach(b => _addEntities(b?.visibility));
+    if (stKey !== this._lastState) {
+      this._lastState = stKey;
+      this._evalVisible();
+    }
     if (!this._rendered) this._render();
     else this._updateCard();
   }
@@ -173,7 +275,7 @@ class CoverMediaCard extends HTMLElement {
     }
     return real;
   }
-  _setPending(attr, val) { this._pending[attr] = { value: val, until: Date.now() + 2000 }; }
+  _setPending(attr, val) { this._pending[attr] = { value: val, until: Date.now() + PENDING_MS }; }
 
   _playerName(i) {
     const p = this._config.players[i];
@@ -187,7 +289,93 @@ class CoverMediaCard extends HTMLElement {
     return p ? (this._hass?.states[p.entity]?.attributes?.icon || 'mdi:speaker-multiple') : 'mdi:speaker-multiple';
   }
 
-  // ── Visibility ──────────────────────────────────────────────────────────────
+  // ── Visible templates ───────────────────────────────────────────────────────
+
+  _evalVisible() {
+    if (!this._hass || !this._player) return;
+    const player  = this._config.players[this._playerIdx];
+    const buttons = player?.buttons ?? this._config.buttons ?? [];
+
+    let btnChanged  = false;
+    let pillChanged = false;
+
+    // Evaluate button visibility conditions
+    buttons.forEach((item, idx) => {
+      const conds = item?.visibility;
+      if (!conds) return;
+      const visible = this._evalConditions(conds);
+      if (this._visibleCache.get(idx) !== visible) {
+        this._visibleCache.set(idx, visible);
+        btnChanged = true;
+      }
+    });
+
+    // Evaluate player visibility conditions
+    this._config.players.forEach((p, i) => {
+      if (!p.visibility) return;
+      const visible = this._evalConditions(p.visibility, p.entity);
+      if (this._playerVisibleCache.get(i) !== visible) {
+        this._playerVisibleCache.set(i, visible);
+        pillChanged = true;
+        if (!visible && i === this._playerIdx) {
+          const first = this._config.players.findIndex((_, j) =>
+            this._playerVisibleCache.get(j) !== false
+          );
+          if (first !== -1 && first !== this._playerIdx) this._switchPlayer(first);
+        }
+      }
+    });
+
+    if (!this._rendered) return;
+    const st = this._state?.state;
+    const { mainControls } = this._el;
+    if (btnChanged && mainControls)
+      mainControls.innerHTML = this._activeButtons().map(b => this._btnHtml(b, st)).join('');
+    if (pillChanged) this._updatePills();
+  }
+
+  _evalConditions(conditions, entityOverride) {
+    // Accept both array and single condition object
+    const conds = Array.isArray(conditions) ? conditions : [conditions];
+    return conds.every(c => this._evalCondition(c, entityOverride));
+  }
+
+  _evalCondition(c, entityOverride) {
+    if (!c?.condition) return true;
+    const entity  = c.entity ?? entityOverride ?? this._player;
+    const state   = this._hass?.states[entity];
+    const stVal   = state?.state;
+    const attrs   = state?.attributes ?? {};
+
+    switch (c.condition) {
+      case 'state': {
+        const val = c.state !== undefined ? c.state : c.state_not;
+        const arr = Array.isArray(val) ? val : [val];
+        const matches = arr.includes(stVal);
+        return c.state !== undefined ? matches : !matches;
+      }
+      case 'numeric_state': {
+        const num = c.attribute ? attrs[c.attribute] : parseFloat(stVal);
+        if (c.above !== undefined && num <= c.above) return false;
+        if (c.below !== undefined && num >= c.below) return false;
+        return true;
+      }
+      case 'attribute':
+        return c.attribute in attrs && attrs[c.attribute] == c.value;
+      case 'user':
+        // user conditions not supported in card context
+        return true;
+      case 'screen':
+        // screen conditions not supported in card context
+        return true;
+      case 'and':
+        return (c.conditions ?? []).every(cc => this._evalCondition(cc, entityOverride));
+      case 'or':
+        return (c.conditions ?? []).some(cc => this._evalCondition(cc, entityOverride));
+      default:
+        return true;
+    }
+  }
 
   _showCtrl() {
     this._ctrlVis = true;
@@ -198,12 +386,13 @@ class CoverMediaCard extends HTMLElement {
     this._ctrlVis = false;
     this._el?.overlay?.classList.remove('visible');
     clearTimeout(this._hideTimer);
+    this._hideTimer = null;
   }
   _scheduleHide() {
     const isActive = this._state?.state === 'playing' || this._state?.state === 'paused';
     if (!isActive) return;
     clearTimeout(this._hideTimer);
-    this._hideTimer = setTimeout(() => this._hideCtrl(), (this._config.show_duration) * 1000);
+    this._hideTimer = setTimeout(() => this._hideCtrl(), this._config.show_duration * 1000);
   }
   _toggleCtrl() {
     const isActive = this._state?.state === 'playing' || this._state?.state === 'paused';
@@ -214,22 +403,107 @@ class CoverMediaCard extends HTMLElement {
   // ── Player switching ────────────────────────────────────────────────────────
 
   _switchPlayer(i) {
-    this._playerIdx  = i;
-    this._lastTitle  = null;
-    this._lastFeats  = null;
-    this._lastIsOff  = null;
-    this._pending    = {};
+    this._playerIdx       = i;
+    this._lastTitle       = null;
+    this._lastFeats       = null;
+    this._lastIsOff       = null;
+    this._lastIsUnavail   = null;
+    this._lastGrouped     = null;
+    this._lastState       = null;
+    this._showVol         = false;
+    this._statusPriority  = 0;
+    clearTimeout(this._volTimer);
+    this._groupExpect     = null;
+    this._groupAction     = null;
+    clearTimeout(this._groupTimer);
+    this._visibleCache.clear();
+    this._playerVisibleCache.clear();
+    this._pending         = {};
+    this._lastIconIdx     = -1;
+    this._lastArtBase     = '';
+    this._lastHasArt      = null;
+    this._lastTrackKey    = null;
+    this._lastBtnStateKey = null;
+    this._lastPillKey     = null;
     this._updatePills();
     this._updateCard();
     this._showCtrl();
+    this._evalVisible();
   }
   _updatePills() {
-    this.shadowRoot.querySelectorAll('.player-pill').forEach((pill, i) => {
-      pill.classList.toggle('active', i === this._playerIdx);
-      pill.querySelector('ha-icon')?.setAttribute('icon', this._playerIcon(i));
-      const s = pill.querySelector('span');
-      if (s) s.textContent = this._playerName(i);
+    const container = this.shadowRoot.getElementById('playerPills');
+    if (!container) return;
+
+    // Compute a group key per player index
+    const groupKeys = this._config.players.map(p => {
+      const state   = this._hass?.states[p.entity];
+      const members = state?.attributes?.group_members ?? [];
+      return members.length > 1 ? `${state?.state ?? 'x'}:${[...members].sort().join(',')}` : null;
     });
+
+    const playerVisKey = this._config.players.map((_, i) => this._playerVisibleCache.get(i) ?? true).join('|');
+    const playerStateKey = this._config.players.map(p => this._hass?.states[p.entity]?.state ?? 'x').join('|');
+    const pillKey = `${this._playerIdx}|${groupKeys.join('|')}|${playerVisKey}|${playerStateKey}`;
+    if (pillKey === this._lastPillKey) return;
+    this._lastPillKey = pillKey;
+
+    // Cluster players: group together players sharing the same groupKey,
+    // preserving order of first appearance
+    const seen     = new Map(); // groupKey → cluster index
+    const clusters = [];
+    this._config.players.forEach((p, i) => {
+      if (this._playerVisibleCache.get(i) === false) return; // hidden by visibility template
+      const key = groupKeys[i];
+      if (key && seen.has(key)) {
+        clusters[seen.get(key)].push(i);
+      } else {
+        seen.set(key, clusters.length);
+        clusters.push([i]);
+      }
+    });
+
+    const parts = [];
+    clusters.forEach(cluster => {
+      const grouped = cluster.length > 1;
+      if (grouped) parts.push('<div class="pill-cluster">');
+
+      cluster.forEach((i, ci) => {
+        const p           = this._config.players[i];
+        const state       = this._hass?.states[p.entity];
+        const unavailable = !state || state.state === 'unavailable';
+        const active      = i === this._playerIdx;
+        const classes     = ['player-pill', active && 'active', unavailable && 'unavailable'].filter(Boolean).join(' ');
+        const icon        = unavailable ? 'mdi:help-circle-outline' : this._playerIcon(i);
+
+        // Only show extra member label on solo pills — cluster already shows grouping visually
+        let pillLabel = this._playerName(i);
+        if (ci === 0 && cluster.length === 1) {
+          const haMembers = state?.attributes?.group_members ?? [];
+          if (haMembers.length > 1) {
+            const visibleConfigured = new Set(
+              this._config.players
+                .filter((_, pi) => this._playerVisibleCache.get(pi) !== false)
+                .map(q => q.entity)
+            );
+            const extra = haMembers
+              .filter(e => e !== p.entity && !visibleConfigured.has(e))
+              .map(e => this._hass?.states[e]?.attributes?.friendly_name
+                     || e.split('.')[1]?.replace(/_/g, ' ') || e);
+            if (extra.length === 1) pillLabel += ' (+ ' + extra[0] + ')';
+            else if (extra.length > 1) pillLabel += ' (+ ' + extra.length + ')';
+          }
+        }
+
+        parts.push(`<button class="${classes}" data-index="${i}">
+          <ha-icon icon="${icon}"></ha-icon>
+          <span>${pillLabel}</span>
+        </button>`);
+      });
+
+      if (grouped) parts.push('</div>');
+    });
+
+    container.innerHTML = parts.join('');
   }
 
   // ── Services ────────────────────────────────────────────────────────────────
@@ -244,7 +518,7 @@ class CoverMediaCard extends HTMLElement {
   _power() {
     const st        = this._state?.state;
     const supported = this._attr('supported_features') ?? 0;
-    if (st === 'off' || st === 'unavailable' || !st) {
+    if (st === 'off' || !st) {
       if (supported & F.TURN_ON) this._call('turn_on');
     } else {
       this._call(supported & F.TURN_OFF ? 'turn_off' : 'media_stop');
@@ -268,32 +542,57 @@ class CoverMediaCard extends HTMLElement {
     const btn = this.shadowRoot.querySelector(`[data-btn-key="${attr}"]`);
     if (!btn) return;
     const val = this._toggleVal(attr);
-    btn.classList.toggle('active-toggle', !!val && val !== 'off' && val !== false);
+    btn.classList.toggle('active-toggle', !!val && val !== 'off');
     btn.innerHTML = BUTTON_DEFS[attr].icon(val);
   }
 
   _volAdj(delta) {
     const supported = this._attr('supported_features') ?? 0;
     if (supported & F.VOLUME_SET) {
-      const step = (this._config.volume_step) / 100;
+      const step = this._config.volume_step / 100;
       const next = Math.min(1, Math.max(0,
         Math.round(((this._attr('volume_level') ?? 0.5) + delta * step) * 100) / 100));
       this._call('volume_set', { volume_level: next });
       this._flashVol(next);
     } else if (supported & F.VOLUME_STEP) {
       this._call(delta > 0 ? 'volume_up' : 'volume_down');
+      const _grouped = (this._attr('group_members')?.length ?? 0) > 1;
+      const _sub     = _grouped ? `Volume · ${this._playerName(this._playerIdx)}` : '';
+      this._flashStatus(delta > 0 ? 'Volume +' : 'Volume −', _sub, 1);
     }
   }
-  _flashVol(level) {
-    this._showVol = true;
+  _flashStatus(title, sub, priority = 1, duration = 2000) {
+    if (this._showVol && priority < this._statusPriority) return;
+    this._showVol        = true;
+    this._statusPriority = priority;
+    // Show overlay without restarting auto-hide timer — that restarts after flash ends
+    this._ctrlVis = true;
+    this._el?.overlay?.classList.add('visible');
+    if (this._el?.trackTitle) this._el.trackTitle.textContent = title;
+    if (this._el?.trackArtist) {
+      this._el.trackArtist.textContent = sub;
+      this._el.trackArtist.style.display = sub ? '' : 'none';
+    }
     clearTimeout(this._volTimer);
-    if (this._el?.trackTitle)  this._el.trackTitle.textContent  = `${Math.round(level * 100)}%`;
-    if (this._el?.trackArtist) this._el.trackArtist.textContent = 'Volume';
-    this._volTimer = setTimeout(() => { this._showVol = false; this._updateTrackInfo(); }, 2000);
+    this._volTimer = setTimeout(() => {
+      this._showVol        = false;
+      this._statusPriority = 0;
+      this._lastTrackKey   = null; // force DOM update after flash
+      this._updateTrackInfo();
+      if (this._config.auto_hide !== false) this._scheduleHide();
+    }, duration);
+  }
+  _flashVol(level) {
+    const grouped = (this._attr('group_members')?.length ?? 0) > 1;
+    const sub     = grouped ? `Volume · ${this._playerName(this._playerIdx)}` : 'Volume';
+    this._flashStatus(`${Math.round(level * 100)}%`, sub, 1);
   }
 
   _fireCustom(ci) {
-    const customs = this._config.buttons.filter(b => b && typeof b === 'object' && !b._disabled);
+    if (!this._hass) return;
+    const player  = this._config.players[this._playerIdx];
+    const buttons = player?.buttons ?? this._config.buttons;
+    const customs = buttons.filter(b => b && typeof b === 'object' && !b._disabled && !b.button);
     const btn = customs[ci];
     if (!btn?.tap_action) return;
     const action = btn.tap_action;
@@ -319,11 +618,48 @@ class CoverMediaCard extends HTMLElement {
     }
   }
 
+  _group() {
+    if (!this._hass || !this._player) return;
+    const player  = this._config.players[this._playerIdx];
+    const members = player?.group_members ?? [];
+    const grouped = (this._attr('group_members')?.length ?? 0) > 1;
+    if (!members.length && !grouped) return;
+
+    // Build a readable list of all involved player names
+    const allEntities = grouped
+      ? (this._attr('group_members') ?? [])
+      : [this._player, ...members];
+    const memberNames = allEntities
+      .map(e => this._hass?.states[e]?.attributes?.friendly_name
+              || e.split('.')[1]?.replace(/_/g, ' ') || e)
+      .join(' · ');
+
+    if (grouped) {
+      this._hass.callService('media_player', 'unjoin', {}, { entity_id: this._player });
+      this._groupExpect = false;
+      this._groupAction = 'unjoin';
+      this._flashStatus('Ungrouping…', memberNames, 2, 9000);
+    } else {
+      this._hass.callService('media_player', 'join',
+        { group_members: members }, { entity_id: this._player });
+      this._groupExpect = true;
+      this._groupAction = 'join';
+      this._flashStatus('Grouping…', memberNames, 2, 9000);
+    }
+    clearTimeout(this._groupTimer);
+    this._groupTimer = setTimeout(() => {
+      if (this._groupExpect === null) return; // already resolved
+      this._flashStatus(this._groupAction === 'join' ? 'Grouping failed' : 'Ungroup failed', memberNames, 2, 2500);
+      // Keep _groupExpect set so we still catch a late HA confirmation
+    }, GROUP_WATCHDOG_MS);
+  }
+
   _handleBtn(key) {
     const map = { play_pause: () => this._playPause(), next: () => this._next(),
       previous: () => this._prev(), shuffle: () => this._toggleShuffle(),
       repeat: () => this._toggleRepeat(), power: () => this._power(),
-      volume_up: () => this._volAdj(1), volume_down: () => this._volAdj(-1) };
+      volume_up: () => this._volAdj(1), volume_down: () => this._volAdj(-1),
+      group: () => this._group() };
     map[key]?.();
   }
 
@@ -331,23 +667,29 @@ class CoverMediaCard extends HTMLElement {
 
   _activeButtons() {
     const st        = this._state?.state;
-    const isOff     = !st || st === 'off' || st === 'unavailable';
-    const supported = this._attr('supported_features') ?? 0xFFFFFFFF;
+    const isOff     = st === 'off';
+    const supported = this._attr('supported_features') ?? 0;
+    const player    = this._config.players[this._playerIdx];
+    const buttons   = player?.buttons ?? this._config.buttons;
     const result = [];
     let ci = 0;
-    (this._config.buttons).forEach(item => {
-      if (item?._disabled) return; // disabled builtin placeholder — skip
-      if (typeof item === 'string') {
-        const def = BUTTON_DEFS[item];
+    if (st === 'unavailable' || st === 'unknown' || !st) return result;
+    buttons.forEach((item, idx) => {
+      if (item?._disabled) return;
+      const key = typeof item === 'string' ? item : item?.button;
+      if (key) {
+        const def = BUTTON_DEFS[key];
         if (!def) return;
-        // When off, only show the power button
-        if (isOff && item !== 'power') return;
-        // Hide if feature not supported
+        if (isOff && key !== 'power') return;
+        if (key === 'group') {
+          const alreadyGrouped = (this._attr('group_members')?.length ?? 0) > 1;
+          if (!player?.group_members?.length && !alreadyGrouped) return;
+        }
         if (def.feature && (supported & def.feature) === 0) return;
-        result.push({ key: item, ...def });
+        if (item?.visibility !== undefined && this._visibleCache.get(idx) === false) return;
+        result.push({ key, ...def });
       } else if (item && typeof item === 'object') {
-        // Custom buttons: always visible, respect player filter
-        if (item.players?.length && !item.players.includes(this._player)) { ci++; return; }
+        if (this._visibleCache.get(idx) === false) { ci++; return; }
         result.push({ isCustom: true, ci: ci++, icon: item.icon, label: item.label || '' });
       }
     });
@@ -359,24 +701,61 @@ class CoverMediaCard extends HTMLElement {
       return `<button class="ctrl-btn" data-custom-index="${btn.ci}" title="${btn.label}">
         <ha-icon icon="${btn.icon}"></ha-icon></button>`;
     }
-    return `<button class="ctrl-btn${btn.isPrimary ? ' play' : ''}"
-      data-btn-key="${btn.key}" title="${btn.label}">${btn.icon(st)}</button>`;
+    const iconVal  = btn.toggleAttr ? this._toggleVal(btn.toggleAttr) : st;
+    const isActive = btn.key === 'group'
+                   ? (this._attr('group_members')?.length ?? 0) > 1
+                   : btn.toggleAttr
+                   ? !!iconVal && iconVal !== 'off'
+                   : false;
+    return `<button class="ctrl-btn${btn.isPrimary ? ' play' : ''}${isActive ? ' active-toggle' : ''}"
+      data-btn-key="${btn.key}" title="${btn.label}">${btn.icon(iconVal)}</button>`;
   }
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
   _render() {
-    this._rendered  = true;
-    this._ctrlVis   = false;
-    this._lastFeats = null;
-    this._lastIsOff = null;
-    this._lastActive = false;
+    this._rendered        = true;
+    this._ctrlVis         = false;
+    this._lastFeats       = null;
+    this._lastIsOff       = null;
+    this._lastIsUnavail   = null;
+    this._lastGrouped     = null;
+    this._lastActive      = false;
+    this._lastState       = null;
+    this._showVol         = false;
+    this._statusPriority  = 0;
+    clearTimeout(this._pressTimer);
+    clearTimeout(this._hideTimer);
+    clearTimeout(this._volTimer);
+    clearTimeout(this._groupTimer);
+    this._groupExpect     = null;
+    this._groupAction     = null;
+    this._pending         = {};
+    this._visibleCache.clear();
+    this._playerVisibleCache.clear();
+    this._lastPillKey     = null;
+    this._lastTitle       = null;
+    this._lastIconIdx     = -1;
+    this._lastArtBase     = '';
+    this._lastHasArt      = null;
+    this._lastTrackKey    = null;
+    this._lastBtnStateKey = null;
     const multi = this._config.players.length > 1;
     const st    = this._state?.state;
 
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display: block; }
+        :host { display: block;
+          --overlay-padding-x: 24px;
+          --overlay-padding-y: 28px;
+          --ctrl-btn-size: 48px;
+          --placeholder-icon-size: 72px;
+          --overlay-bg: rgba(0,0,0,0.55);
+          --placeholder-bg: #2c2c2e;
+          --pill-bg: rgba(255,255,255,0.12);
+          --pill-active-bg: #fff;
+          --pill-active-color: #111;
+        }
         ha-card {
           display: block; position: relative; overflow: hidden;
           isolation: isolate;
@@ -397,36 +776,62 @@ class CoverMediaCard extends HTMLElement {
         }
         .art-img.loaded { opacity: 1; }
 
+        .art-placeholder {
+          position: absolute; inset: 0;
+          display: flex; align-items: center; justify-content: center;
+          background: var(--placeholder-bg);
+          opacity: 1; transition: opacity .3s ease;
+        }
+        .art-placeholder.hidden { opacity: 0; pointer-events: none; }
+        .art-placeholder ha-icon {
+          --mdc-icon-size: var(--placeholder-icon-size);
+          color: rgba(255,255,255,0.12);
+        }
+
         /* ── Overlay ───────────────────────────────────── */
         .overlay {
           z-index: 10;
           display: flex; flex-direction: column;
           align-items: center; justify-content: space-between;
-          padding: 28px 24px;
+          padding: var(--overlay-padding-y) var(--overlay-padding-x);
           background: transparent; opacity: 0;
           transition: opacity .3s ease, background .3s ease;
           pointer-events: none;
         }
-        .overlay.visible { opacity: 1; background: rgba(0,0,0,0.55); pointer-events: all; }
+        .overlay.visible { opacity: 1; background: var(--overlay-bg); pointer-events: all; }
 
         .top-bar { width: 100%; display: flex; justify-content: center; }
         .player-pills { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
         .player-pill {
           display: flex; align-items: center; gap: 6px;
           padding: 6px 14px 6px 10px; border-radius: 999px; border: none;
-          background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.7);
+          background: var(--pill-bg); color: rgba(255,255,255,0.7);
           font-family: inherit; font-size: 13px; font-weight: 500;
           cursor: pointer; white-space: nowrap;
           transition: background .2s, color .2s;
-          box-shadow: 0 1px 4px rgba(0,0,0,.25); backdrop-filter: blur(4px);
+          box-shadow: 0 1px 4px rgba(0,0,0,.25);
+          max-width: calc(100% - var(--overlay-padding-x) * 2);
         }
+        .player-pill span { overflow: hidden; text-overflow: ellipsis; }
         .player-pill:hover  { background: rgba(255,255,255,0.22); color: #fff; }
-        .player-pill.active { background: #fff; color: #111; font-weight: 600; }
+        .player-pill.active { background: var(--pill-active-bg); color: var(--pill-active-color); }
+        .pill-cluster {
+          display: flex; align-items: center;
+          border-radius: 999px;
+          box-shadow: 0 1px 4px rgba(0,0,0,.25);
+          max-width: calc(100% - var(--overlay-padding-x) * 2);
+        }
+        .pill-cluster .player-pill { box-shadow: none; max-width: none; flex: 1 1 0; min-width: 0; }
+        .player-pill.unavailable { opacity: 0.45; }
+        .player-pill.unavailable:hover { background: rgba(255,255,255,0.22); color: #fff; }
         .player-pill ha-icon { --mdc-icon-size: 16px; flex-shrink: 0; }
+        .pill-cluster .player-pill:not(:last-child) { border-radius: 999px 0 0 999px; }
+        .pill-cluster .player-pill:not(:first-child) { border-radius: 0 999px 999px 0; }
 
         .center-area {
           display: flex; flex-direction: column; align-items: center;
           gap: 4px; width: 100%; padding: 0 8px; text-align: center;
+          transition: opacity .25s ease;
         }
         .track-title {
           font-size: clamp(20px,6.5vw,28px); font-weight: 700; color: #fff;
@@ -443,10 +848,10 @@ class CoverMediaCard extends HTMLElement {
         .controls-row  { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
 
         .ctrl-btn {
-          width: 48px; height: 48px; flex-shrink: 0; border-radius: 50%; border: none;
+          width: var(--ctrl-btn-size); height: var(--ctrl-btn-size); flex-shrink: 0; border-radius: 50%; border: none;
           cursor: pointer; display: flex; align-items: center; justify-content: center;
           color: #fff; background: rgba(255,255,255,.12);
-          transition: background .15s, transform .1s;
+          transition: background .15s, transform .1s, box-shadow .15s;
         }
         .ctrl-btn:hover  { background: rgba(255,255,255,.2); }
         .ctrl-btn:active { transform: scale(.92); }
@@ -454,41 +859,36 @@ class CoverMediaCard extends HTMLElement {
         .ctrl-btn.play:hover { background: rgba(255,255,255,.9); }
         .ctrl-btn.active-toggle { background: #fff; color: #111; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
         .ctrl-btn.active-toggle:hover { background: rgba(255,255,255,.9); }
-        .ctrl-btn svg, .ctrl-btn ha-icon { pointer-events: none; }
-        .ctrl-btn ha-icon { --mdc-icon-size: 20px; }
-
-
+        .ctrl-btn ha-icon { pointer-events: none; --mdc-icon-size: 20px; display: flex; }
       </style>
 
       <ha-card>
         <div class="card-aspect">
-        <div class="card-inner" id="cardInner">
+          <div class="card-inner" id="cardInner">
 
-          <img class="art-img" id="artImg" src="" alt="" />
-
-          <div class="overlay" id="overlay">
-            <div class="top-bar">
-              ${multi ? `<div class="player-pills" id="playerPills">
-                ${this._config.players.map((p, i) => `
-                  <button class="player-pill${i === 0 ? ' active' : ''}" data-index="${i}">
-                    <ha-icon icon="${this._playerIcon(i)}"></ha-icon>
-                    <span>${this._playerName(i)}</span>
-                  </button>`).join('')}
-              </div>` : ''}
+            <img class="art-img" id="artImg" src="" alt="" />
+            <div class="art-placeholder" id="artPlaceholder">
+              <ha-icon id="artPlaceholderIcon" icon="${this._playerIcon(this._playerIdx)}"></ha-icon>
             </div>
 
-            <div class="center-area">
-              <div class="track-title" id="trackTitle"></div>
-              <div class="track-artist" id="trackArtist"></div>
-            </div>
+            <div class="overlay" id="overlay">
+              <div class="top-bar">
+                ${multi ? `<div class="player-pills" id="playerPills"></div>` : ''}
+              </div>
 
-            <div class="controls-wrap">
-              <div class="controls-row" id="mainControls">
-                ${this._activeButtons().map(b => this._btnHtml(b, st)).join('')}
+              <div class="center-area">
+                <div class="track-title" id="trackTitle"></div>
+                <div class="track-artist" id="trackArtist"></div>
+              </div>
+
+              <div class="controls-wrap">
+                <div class="controls-row" id="mainControls">
+                  ${this._activeButtons().map(b => this._btnHtml(b, st)).join('')}
+                </div>
               </div>
             </div>
-          </div>
 
+          </div>
         </div>
       </ha-card>`;
 
@@ -499,6 +899,20 @@ class CoverMediaCard extends HTMLElement {
       if (e.target.closest('button')) return;
       this._toggleCtrl();
     });
+
+    // Long press on card → more-info
+    inner.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button')) return;
+      this._pressTimer = setTimeout(() => {
+        this._pressTimer = null;
+        this.dispatchEvent(new CustomEvent('hass-more-info',
+          { detail: { entityId: this._player }, bubbles: true, composed: true }));
+      }, LONG_PRESS_MS);
+    });
+    const _cancelPress = () => { clearTimeout(this._pressTimer); this._pressTimer = null; };
+    inner.addEventListener('pointerup',     _cancelPress);
+    inner.addEventListener('pointermove',   _cancelPress);
+    inner.addEventListener('pointercancel', _cancelPress);
 
     // Delegate all control clicks
     controls.addEventListener('click', (e) => {
@@ -532,10 +946,13 @@ class CoverMediaCard extends HTMLElement {
     this._el = {
       artImg,
       cardAspect,
-      overlay:      this.shadowRoot.querySelector('.overlay'),
-      trackTitle:   this.shadowRoot.querySelector('#trackTitle'),
-      trackArtist:  this.shadowRoot.querySelector('#trackArtist'),
-      mainControls: this.shadowRoot.querySelector('#mainControls'),
+      overlay:          this.shadowRoot.querySelector('.overlay'),
+      trackTitle:       this.shadowRoot.querySelector('#trackTitle'),
+      trackArtist:      this.shadowRoot.querySelector('#trackArtist'),
+      centerArea:       this.shadowRoot.querySelector('.center-area'),
+      mainControls:     this.shadowRoot.querySelector('#mainControls'),
+      artPlaceholder:   this.shadowRoot.querySelector('#artPlaceholder'),
+      artPlaceholderIcon: this.shadowRoot.querySelector('#artPlaceholderIcon'),
     };
   }
 
@@ -553,14 +970,35 @@ class CoverMediaCard extends HTMLElement {
 
   _updateTrackInfo() {
     if (this._showVol) return;
-    const title    = this._attr('media_title') || this._attr('media_content_id') || '';
+    const title    = this._attr('media_title') || '';
     const artist   = this._attr('media_artist') || this._attr('app_name') || '';
     const hasMedia = !!(title || artist);
-    if (this._el?.trackTitle)  this._el.trackTitle.textContent = hasMedia ? title : this._playerName(this._playerIdx);
-    if (this._el?.trackArtist) {
-      this._el.trackArtist.textContent = artist;
-      this._el.trackArtist.style.display = hasMedia ? '' : 'none';
-    }
+    const st       = this._state?.state;
+    const stateLabel = (!hasMedia && st && st !== 'playing' && st !== 'paused')
+      ? st.charAt(0).toUpperCase() + st.slice(1) : '';
+    const display  = hasMedia ? title : this._playerName(this._playerIdx);
+    const sub      = hasMedia ? artist : stateLabel;
+    const trackKey = `${display}|${sub}`;
+    if (trackKey === this._lastTrackKey) return;
+    const wasNull = this._lastTrackKey === null;
+    this._lastTrackKey = trackKey;
+
+    const write = () => {
+      if (this._el?.trackTitle) this._el.trackTitle.textContent = display;
+      if (this._el?.trackArtist) {
+        this._el.trackArtist.textContent = sub;
+        this._el.trackArtist.style.display = sub ? '' : 'none';
+      }
+    };
+
+    const ca = this._el?.centerArea;
+    if (wasNull || !ca || !this._ctrlVis) { write(); return; }
+
+    ca.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150, easing: 'ease' })
+      .onfinish = () => {
+        write();
+        ca.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: 'ease' });
+      };
   }
 
   _updateCard() {
@@ -568,46 +1006,94 @@ class CoverMediaCard extends HTMLElement {
 
     const st       = this._state?.state;
     const isActive = st === 'playing' || st === 'paused';
-    const artUrl   = this._attr('entity_picture');
-    const title    = this._attr('media_title') || this._attr('media_content_id') || '';
+    // Ignore stale entity_picture when unavailable — HA keeps old value after disconnect
+    const artUrl   = (st === 'unavailable' || st === 'unknown' || !st) ? null : this._attr('entity_picture');
+    const title    = this._attr('media_title') || '';
 
     // ── Art ───────────────────────────────────────────────
-    const { artImg, cardAspect, overlay, mainControls } = this._el;
+    const { artImg, cardAspect, overlay, mainControls, artPlaceholder, artPlaceholderIcon } = this._el;
+    // Compare the 'cache' param — changes when image changes, unlike the base path
+    const _cacheParam = (url) => url?.match(/[?&]cache=([^&]*)/)?.[1] ?? url?.split('?')[0] ?? '';
+    const artBase = _cacheParam(artUrl);
     if (artUrl) {
-      if (artImg.getAttribute('src') !== artUrl) {
+      if (artBase !== this._lastArtBase) {
+        this._lastArtBase = artBase;
         artImg.classList.remove('loaded');
         artImg.src = artUrl;
         // ratio applied on load event
       }
     } else {
-      artImg.src = '';
-      artImg.classList.remove('loaded');
-      if (cardAspect) cardAspect.style.paddingBottom = '100%';
+      if (this._lastArtBase !== '') {
+        this._lastArtBase = '';
+        artImg.src = '';
+        artImg.classList.remove('loaded');
+        if (cardAspect) cardAspect.style.paddingBottom = '100%';
+      }
+    }
+    if (artPlaceholder) {
+      const hasArt = !!artUrl;
+      if (hasArt !== this._lastHasArt) {
+        this._lastHasArt = hasArt;
+        artPlaceholder.classList.toggle('hidden', hasArt);
+      }
+      if (artPlaceholderIcon && this._playerIdx !== this._lastIconIdx) {
+        this._lastIconIdx = this._playerIdx;
+        artPlaceholderIcon.setAttribute('icon', this._playerIcon(this._playerIdx));
+      }
     }
 
     this._updateTrackInfo();
 
-    // ── Rebuild buttons on feature or off/on state change ─────
-    const feats  = this._attr('supported_features') ?? 0xFFFFFFFF;
-    const isOff  = !st || st === 'off' || st === 'unavailable';
-    if (feats !== this._lastFeats || isOff !== this._lastIsOff) {
-      this._lastFeats = feats;
-      this._lastIsOff = isOff;
+    // ── Group operation success detection ─────────────────────
+    if (this._groupExpect !== null) {
+      const grouped = (this._attr('group_members')?.length ?? 0) > 1;
+      if (grouped === this._groupExpect) {
+        clearTimeout(this._groupTimer);
+        this._groupExpect = null;
+        const haMembers   = this._attr('group_members') ?? [];
+        const successNames = (grouped ? haMembers : [this._player])
+          .map(e => this._hass?.states[e]?.attributes?.friendly_name
+                  || e.split('.')[1]?.replace(/_/g, ' ') || e)
+          .join(' · ');
+        this._flashStatus(grouped ? 'Grouped' : 'Ungrouped', successNames, 2, 1500);
+      }
+    }
+
+    // ── Rebuild buttons on feature, off/on, unavailable, or grouped state change ─────
+    const feats      = this._attr('supported_features') ?? 0xFFFFFFFF;
+    const isOff      = st === 'off';
+    const isUnavail  = st === 'unavailable' || st === 'unknown' || !st;
+    const grouped    = (this._attr('group_members')?.length ?? 0) > 1;
+    if (feats !== this._lastFeats || isOff !== this._lastIsOff || isUnavail !== this._lastIsUnavail || grouped !== this._lastGrouped) {
+      this._lastFeats    = feats;
+      this._lastIsOff    = isOff;
+      this._lastIsUnavail = isUnavail;
+      this._lastGrouped  = grouped;
       if (mainControls) mainControls.innerHTML = this._activeButtons().map(b => this._btnHtml(b, st)).join('');
     }
 
     // ── Update button icons + toggle states ─────────────────
-    this.shadowRoot.querySelectorAll('[data-btn-key]').forEach(btn => {
-      const def = BUTTON_DEFS[btn.dataset.btnKey];
-      if (!def) return;
-      if (def.toggleAttr) {
-        const val = this._toggleVal(def.toggleAttr);
-        btn.classList.toggle('active-toggle', !!val && val !== 'off' && val !== false);
-        btn.innerHTML = def.icon(val);
-      } else {
-        btn.innerHTML = def.icon(st);
-      }
-    });
+    const shuffle    = this._toggleVal('shuffle');
+    const repeat     = this._toggleVal('repeat');
+    const btnStateKey = `${st}|${grouped}|${shuffle}|${repeat}`;
+    if (btnStateKey !== this._lastBtnStateKey) {
+      this._lastBtnStateKey = btnStateKey;
+      this.shadowRoot.querySelectorAll('[data-btn-key]').forEach(btn => {
+        const key = btn.dataset.btnKey;
+        const def = BUTTON_DEFS[key];
+        if (!def) return;
+        if (key === 'group') {
+          btn.classList.toggle('active-toggle', grouped);
+        } else if (def.toggleAttr) {
+          const val = this._toggleVal(def.toggleAttr);
+          btn.classList.toggle('active-toggle', !!val && val !== 'off');
+          btn.innerHTML = def.icon(val);
+        } else if (key === 'play_pause') {
+          btn.innerHTML = def.icon(st);
+        }
+        // previous, next, power, volume_up/down icons never change — skip
+      });
+    }
 
     // ── Controls visibility based on media state ─────────────
     if (!isActive) {
@@ -661,15 +1147,17 @@ const ALL_BUTTONS_INFO = [
   { key: 'shuffle',     label: 'Shuffle',      icon: 'mdi:shuffle' },
   { key: 'repeat',      label: 'Repeat',       icon: 'mdi:repeat' },
   { key: 'power',       label: 'Power',        icon: 'mdi:power' },
+  { key: 'group',       label: 'Group',        icon: 'mdi:speaker-multiple' },
 ];
+
 class CoverMediaCardEditor extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
-    this._config   = null;
-    this._hass     = null;
-    this._built    = false;
-    this._expanded = {};
+    this._config    = null;
+    this._hass      = null;
+    this._built     = false;
+    this._expanded  = {};
   }
 
   set hass(hass) {
@@ -679,22 +1167,26 @@ class CoverMediaCardEditor extends HTMLElement {
   }
 
   setConfig(config) {
-    const prevLen = this._config?.buttons?.length ?? -1;
-    this._config  = _normalizeConfig(config);
+    this._config = _normalizeConfig(config);
     if (!this._built) { this._init(); return; }
     this._pushFormData();
-    if (this._config.buttons.length !== prevLen) {
-      this._renderButtonList();
-      this._renderSettings();
-    } else {
-      this._updateBtnForms();
-    }
+    this._renderButtonList();
   }
 
   _fire(config) {
     this._config = config;
     const DEFAULTS = { show_duration: 10, auto_hide: true, show_on_change: true, aspect_ratio: 'auto', volume_step: 2 };
-    const clean = { ...config, buttons: (config.buttons || []).filter(b => !b?._disabled) };
+    const cleanButtons = (btns) => (btns || []).filter(b => !b?._disabled);
+    const clean = {
+      ...config,
+      buttons: cleanButtons(config.buttons),
+      players: (config.players || []).map(p => {
+        if (!p.buttons) return p;
+        const cleaned = cleanButtons(p.buttons);
+        if (!cleaned.length) { const { buttons: _b, ...rest } = p; return rest; }
+        return { ...p, buttons: cleaned };
+      }),
+    };
     for (const [k, v] of Object.entries(DEFAULTS)) {
       if (clean[k] === v) delete clean[k];
     }
@@ -814,7 +1306,11 @@ class CoverMediaCardEditor extends HTMLElement {
     this._playersForm.computeLabel = () => '';
     if (this._hass) this._playersForm.hass = this._hass;
     this._playersForm.addEventListener('value-changed', (e) => {
-      this._fire({ ...this._config, players: e.detail.value.players });
+      const entities = e.detail.value.players || [];
+      // Preserve existing player objects (name/group_members/buttons), only reorder/add/remove
+      const existing = this._config.players;
+      const players  = entities.map(entity => existing.find(p => p.entity === entity) || { entity });
+      this._fire({ ...this._config, players });
       this._updateEmptyState();
     });
     root.appendChild(this._playersForm);
@@ -869,7 +1365,6 @@ class CoverMediaCardEditor extends HTMLElement {
 
     this._pushFormData();
     this._renderButtonList();
-    this._updateEmptyState();
   }
 
   // ── Settings rendering ───────────────────────────────────────────────────────
@@ -943,7 +1438,10 @@ class CoverMediaCardEditor extends HTMLElement {
   _renderSettings() {
     if (!this._generalRows) return;
     const autoHide  = this._config.auto_hide ?? true;
-    const hasVolume = this._config.buttons.some(b => b === 'volume_up' || b === 'volume_down');
+    const hasVolume = this._config.buttons.some(b => {
+      const key = typeof b === 'string' ? b : b?.button;
+      return key === 'volume_up' || key === 'volume_down';
+    });
 
     this._generalRows.innerHTML = '';
     this._generalRows.appendChild(this._mkSelectRow('Aspect ratio', 'aspect_ratio', [
@@ -963,7 +1461,7 @@ class CoverMediaCardEditor extends HTMLElement {
   }
 
   _pushFormData() {
-    const entities = this._config.players.map(p => p.entity || p).filter(Boolean);
+    const entities = this._config.players.map(p => p.entity).filter(Boolean);
     if (this._playersForm) this._playersForm.data = { players: entities };
     this._renderSettings();
     this._updateEmptyState();
@@ -979,12 +1477,10 @@ class CoverMediaCardEditor extends HTMLElement {
   // ── Button list ─────────────────────────────────────────────────────────────
 
   _renderButtonList() {
-    const list = this._btnList;
-    if (!list) return;
-    list.innerHTML = '';
-
-    const buttons = this._config.buttons;
-
+    const list     = this._btnList;
+    const buttons  = this._config.buttons;
+    const expanded = this._expanded;
+    const save = (newButtons) => { this._fire({ ...this._config, buttons: newButtons }); };
     const mkArrowBtn = (ico, disabled, onClick) => {
       const b = document.createElement('ha-icon-button');
       const i = document.createElement('ha-icon');
@@ -995,10 +1491,13 @@ class CoverMediaCardEditor extends HTMLElement {
       return b;
     };
 
+    if (!list) return;
+    list.innerHTML = '';
+
     const swapExpanded = (a, b) => {
-      const tmp = this._expanded[a];
-      this._expanded[a] = this._expanded[b];
-      this._expanded[b] = tmp;
+      const tmp = expanded[a];
+      expanded[a] = expanded[b];
+      expanded[b] = tmp;
     };
 
     buttons.forEach((item, arrIdx) => {
@@ -1007,6 +1506,7 @@ class CoverMediaCardEditor extends HTMLElement {
         const key  = item._disabled;
         const info = ALL_BUTTONS_INFO.find(b => b.key === key);
         if (!info) return;
+        if (key === 'group' && !this._config.players.some(p => p.group_members?.length)) return;
         const row = document.createElement('div');
         row.className = 'btn-row';
         const icon = document.createElement('ha-icon');
@@ -1022,11 +1522,9 @@ class CoverMediaCardEditor extends HTMLElement {
         const toggle = document.createElement('ha-switch');
         toggle.checked = false;
         toggle.addEventListener('change', () => {
-          // Replace the {_disabled} marker with the real key — position preserved
           const arr = [...buttons];
           arr[arrIdx] = key;
-          this._fire({ ...this._config, buttons: arr });
-          this._renderButtonList();
+          save(arr);
         });
         toggleWrap.appendChild(toggle);
         row.appendChild(icon); row.appendChild(label);
@@ -1037,6 +1535,7 @@ class CoverMediaCardEditor extends HTMLElement {
 
       const isBuiltin = typeof item === 'string';
       const info      = isBuiltin ? ALL_BUTTONS_INFO.find(b => b.key === item) : null;
+      if (isBuiltin && item === 'group' && !this._config.players.some(p => p.group_members?.length)) return;
 
       const row = document.createElement('div');
       row.className = 'btn-row enabled';
@@ -1058,15 +1557,13 @@ class CoverMediaCardEditor extends HTMLElement {
         const arr = [...buttons];
         [arr[prevRealIdx], arr[arrIdx]] = [arr[arrIdx], arr[prevRealIdx]];
         swapExpanded(arrIdx, prevRealIdx);
-        this._fire({ ...this._config, buttons: arr });
-        this._renderButtonList();
+        save(arr);
       }));
       arrows.appendChild(mkArrowBtn('mdi:arrow-down', nextRealIdx === -1, () => {
         const arr = [...buttons];
         [arr[arrIdx], arr[nextRealIdx]] = [arr[nextRealIdx], arr[arrIdx]];
         swapExpanded(arrIdx, nextRealIdx);
-        this._fire({ ...this._config, buttons: arr });
-        this._renderButtonList();
+        save(arr);
       }));
 
       row.appendChild(icon);
@@ -1079,17 +1576,15 @@ class CoverMediaCardEditor extends HTMLElement {
         const toggle = document.createElement('ha-switch');
         toggle.checked = true;
         toggle.addEventListener('change', () => {
-          // Replace the key with a {_disabled} marker — position preserved
           const arr = [...buttons];
           arr[arrIdx] = { _disabled: item };
-          this._fire({ ...this._config, buttons: arr });
-          this._renderButtonList();
+          save(arr);
         });
         toggleWrap.appendChild(toggle);
         row.appendChild(toggleWrap);
         list.appendChild(row);
       } else {
-        const isOpen = !!this._expanded[arrIdx];
+        const isOpen = !!expanded[arrIdx];
 
         const expandWrap = document.createElement('div');
         expandWrap.className = 'row-action';
@@ -1108,8 +1603,8 @@ class CoverMediaCardEditor extends HTMLElement {
 
         expandBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          this._expanded[arrIdx] = !this._expanded[arrIdx];
-          const open = this._expanded[arrIdx];
+          expanded[arrIdx] = !expanded[arrIdx];
+          const open = expanded[arrIdx];
           expandIco.setAttribute('icon', open ? 'mdi:chevron-up' : 'mdi:chevron-down');
           expandBtn.title = open ? 'Collapse' : 'Edit';
           body.classList.toggle('open', open);
@@ -1120,22 +1615,18 @@ class CoverMediaCardEditor extends HTMLElement {
         const form = document.createElement('ha-form');
         form.className = 'btn-form';
         form.schema    = [
-          { name: 'icon',       selector: { icon: {} } },
-          { name: 'label',      selector: { text: {} } },
-          { name: 'players',    selector: { entity: { multiple: true, domain: 'media_player' } } },
+          { name: 'icon',  selector: { icon: {} } },
+          { name: 'label', selector: { text: {} } },
         ];
         form.data = item;
-        form.computeLabel = (s) => ({
-          icon: 'Icon', label: 'Label (tooltip)',
-          players: 'Show only for these players (empty = always)',
-        }[s.name] || s.name);
+        form.computeLabel = (s) => ({ icon: 'Icon', label: 'Label (tooltip)' }[s.name] || s.name);
         if (this._hass) form.hass = this._hass;
         form.addEventListener('value-changed', (e) => {
           const arr = [...buttons];
           arr[arrIdx] = { ...arr[arrIdx], ...e.detail.value };
           icon.setAttribute('icon', arr[arrIdx].icon || 'mdi:gesture-tap-button');
           label.textContent = arr[arrIdx].label || arr[arrIdx].tap_action?.perform_action || 'Custom button';
-          this._fire({ ...this._config, buttons: arr });
+          save(arr);
         });
 
         const actionForm = document.createElement('ha-form');
@@ -1148,7 +1639,7 @@ class CoverMediaCardEditor extends HTMLElement {
           const arr = [...buttons];
           arr[arrIdx] = { ...arr[arrIdx], ...e.detail.value };
           label.textContent = arr[arrIdx].label || arr[arrIdx].tap_action?.perform_action || 'Custom button';
-          this._fire({ ...this._config, buttons: arr });
+          save(arr);
         });
 
         const subLabelAppearance = Object.assign(document.createElement('div'),
@@ -1171,9 +1662,8 @@ class CoverMediaCardEditor extends HTMLElement {
         delBtn.textContent = 'Remove custom button';
         delBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          delete this._expanded[arrIdx];
-          this._fire({ ...this._config, buttons: buttons.filter((_, j) => j !== arrIdx) });
-          this._renderButtonList();
+          delete expanded[arrIdx];
+          save(buttons.filter((_, j) => j !== arrIdx));
         });
         body.appendChild(delBtn);
         list.appendChild(row);
@@ -1182,17 +1672,6 @@ class CoverMediaCardEditor extends HTMLElement {
     });
   }
 
-  _updateBtnForms() {
-    const buttons = this._config.buttons;
-    let fi = 0;
-    const forms = [...(this._btnList?.querySelectorAll('.btn-form') || [])];
-    buttons.forEach(item => {
-      if (!item || typeof item !== 'object' || item._disabled) return;
-      if (forms[fi])   forms[fi].data   = item;
-      if (forms[fi+1]) forms[fi+1].data = item;
-      fi += 2;
-    });
-  }
 }
 
 customElements.define('cover-media-card-editor', CoverMediaCardEditor);
