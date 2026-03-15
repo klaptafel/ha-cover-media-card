@@ -78,7 +78,7 @@
  * in HA for time-based visibility.
  */
 
-const CARD_VERSION = '0.2.0';
+const CARD_VERSION = '0.2.1';
 
 const LONG_PRESS_MS   = 500;   // long press → more-info
 const PENDING_MS      = 2000;  // optimistic toggle pending window
@@ -233,7 +233,7 @@ class CoverMediaCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     const s    = hass?.states[this._player];
-    let stKey = `${s?.state}|${s?.attributes?.app_name}|${s?.attributes?.media_title}`;
+    let stKey = `${s?.state}|${s?.attributes?.media_title}|${s?.attributes?.media_artist}|${s?.attributes?.app_name}`;
     // Watch all entities referenced in any visibility condition
     const _addEntities = (conds) => {
       if (!conds) return;
@@ -972,12 +972,15 @@ class CoverMediaCard extends HTMLElement {
     if (this._showVol) return;
     const title    = this._attr('media_title') || '';
     const artist   = this._attr('media_artist') || this._attr('app_name') || '';
-    const hasMedia = !!(title || artist);
     const st       = this._state?.state;
     const stateLabel = (!hasMedia && st && st !== 'playing' && st !== 'paused')
       ? st.charAt(0).toUpperCase() + st.slice(1) : '';
-    const display  = hasMedia ? title : this._playerName(this._playerIdx);
-    const sub      = hasMedia ? artist : stateLabel;
+
+    // title + artist → title / artist
+    // artist only   → artist / —
+    // no media      → player name / state label
+    const display = title || artist || this._playerName(this._playerIdx);
+    const sub     = title ? artist : (artist ? '' : stateLabel);
     const trackKey = `${display}|${sub}`;
     if (trackKey === this._lastTrackKey) return;
     const wasNull = this._lastTrackKey === null;
