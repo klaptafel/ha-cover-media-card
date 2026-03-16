@@ -83,6 +83,7 @@ const CARD_VERSION = '0.2.1';
 const LONG_PRESS_MS   = 500;   // long press → more-info
 const PENDING_MS      = 2000;  // optimistic toggle pending window
 const GROUP_WATCHDOG_MS = 8000; // group operation timeout
+const STATUS_MS         = 2000;  // default status flash duration
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Button definitions
@@ -104,6 +105,10 @@ const F = {
 };
 
 const mkIcon = (mdi) => `<ha-icon icon="${mdi}"></ha-icon>`;
+const _entityName = (entity, hass) =>
+  hass?.states[entity]?.attributes?.friendly_name
+  || entity.split('.')[1]?.replace(/_/g, ' ') || entity;
+const _cacheParam = (url) => url?.match(/[?&]cache=([^&]*)/)?.[1] ?? url?.split('?')[0] ?? '';
 
 const BUTTON_DEFS = {
   previous: {
@@ -262,9 +267,10 @@ class CoverMediaCard extends HTMLElement {
 
   // ── Accessors ───────────────────────────────────────────────────────────────
 
-  get _player() { return this._config.players[this._playerIdx]?.entity ?? null; }
-  get _state()  { return this._hass?.states[this._player] ?? null; }
-  _attr(a)      { return this._state?.attributes?.[a] ?? null; }
+  get _player()  { return this._config.players[this._playerIdx]?.entity ?? null; }
+  get _state()   { return this._hass?.states[this._player] ?? null; }
+  get _grouped() { return (this._attr('group_members')?.length ?? 0) > 1; }
+  _attr(a)       { return this._state?.attributes?.[a] ?? null; }
 
   _toggleVal(attr) {
     const p    = this._pending[attr];
@@ -280,9 +286,7 @@ class CoverMediaCard extends HTMLElement {
   _playerName(i) {
     const p = this._config.players[i];
     if (!p) return '';
-    return p.name
-      || this._hass?.states[p.entity]?.attributes?.friendly_name
-      || p.entity.split('.')[1]?.replace(/_/g, ' ') || p.entity;
+    return p.name || _entityName(p.entity, this._hass);
   }
   _playerIcon(i) {
     const p = this._config.players[i];
@@ -438,7 +442,7 @@ class CoverMediaCard extends HTMLElement {
     const groupKeys = this._config.players.map(p => {
       const state   = this._hass?.states[p.entity];
       const members = state?.attributes?.group_members ?? [];
-      return members.length > 1 ? `${state?.state ?? 'x'}:${[...members].sort().join(',')}` : null;
+      return members.length > 1 ? [...members].sort().join(',') : null;
     });
 
     const playerVisKey = this._config.players.map((_, i) => this._playerVisibleCache.get(i) ?? true).join('|');
@@ -487,8 +491,7 @@ class CoverMediaCard extends HTMLElement {
             );
             const extra = haMembers
               .filter(e => e !== p.entity && !visibleConfigured.has(e))
-              .map(e => this._hass?.states[e]?.attributes?.friendly_name
-                     || e.split('.')[1]?.replace(/_/g, ' ') || e);
+              .map(e => _entityName(e, this._hass));
             if (extra.length === 1) pillLabel += ' (+ ' + extra[0] + ')';
             else if (extra.length > 1) pillLabel += ' (+ ' + extra.length + ')';
           }
@@ -556,12 +559,11 @@ class CoverMediaCard extends HTMLElement {
       this._flashVol(next);
     } else if (supported & F.VOLUME_STEP) {
       this._call(delta > 0 ? 'volume_up' : 'volume_down');
-      const _grouped = (this._attr('group_members')?.length ?? 0) > 1;
-      const _sub     = _grouped ? `Volume · ${this._playerName(this._playerIdx)}` : '';
+      const _sub = this._grouped ? `Volume · ${this._playerName(this._playerIdx)}` : '';
       this._flashStatus(delta > 0 ? 'Volume +' : 'Volume −', _sub, 1);
     }
   }
-  _flashStatus(title, sub, priority = 1, duration = 2000) {
+  _flashStatus(title, sub, priority = 1, duration = STATUS_MS) {
     if (this._showVol && priority < this._statusPriority) return;
     this._showVol        = true;
     this._statusPriority = priority;
@@ -583,8 +585,7 @@ class CoverMediaCard extends HTMLElement {
     }, duration);
   }
   _flashVol(level) {
-    const grouped = (this._attr('group_members')?.length ?? 0) > 1;
-    const sub     = grouped ? `Volume · ${this._playerName(this._playerIdx)}` : 'Volume';
+    const sub = this._grouped ? `Volume · ${this._playerName(this._playerIdx)}` : 'Volume';
     this._flashStatus(`${Math.round(level * 100)}%`, sub, 1);
   }
 
@@ -622,16 +623,15 @@ class CoverMediaCard extends HTMLElement {
     if (!this._hass || !this._player) return;
     const player  = this._config.players[this._playerIdx];
     const members = player?.group_members ?? [];
-    const grouped = (this._attr('group_members')?.length ?? 0) > 1;
-    if (!members.length && !grouped) return;
+    if (!members.length && !this._grouped) return;
+    const grouped = this._grouped;
 
     // Build a readable list of all involved player names
     const allEntities = grouped
       ? (this._attr('group_members') ?? [])
       : [this._player, ...members];
     const memberNames = allEntities
-      .map(e => this._hass?.states[e]?.attributes?.friendly_name
-              || e.split('.')[1]?.replace(/_/g, ' ') || e)
+      .map(e => _entityName(e, this._hass))
       .join(' · ');
 
     if (grouped) {
@@ -682,7 +682,7 @@ class CoverMediaCard extends HTMLElement {
         if (!def) return;
         if (isOff && key !== 'power') return;
         if (key === 'group') {
-          const alreadyGrouped = (this._attr('group_members')?.length ?? 0) > 1;
+          const alreadyGrouped = this._grouped;
           if (!player?.group_members?.length && !alreadyGrouped) return;
         }
         if (def.feature && (supported & def.feature) === 0) return;
@@ -703,7 +703,7 @@ class CoverMediaCard extends HTMLElement {
     }
     const iconVal  = btn.toggleAttr ? this._toggleVal(btn.toggleAttr) : st;
     const isActive = btn.key === 'group'
-                   ? (this._attr('group_members')?.length ?? 0) > 1
+                   ? this._grouped
                    : btn.toggleAttr
                    ? !!iconVal && iconVal !== 'off'
                    : false;
@@ -801,7 +801,7 @@ class CoverMediaCard extends HTMLElement {
         .overlay.visible { opacity: 1; background: var(--overlay-bg); pointer-events: all; }
 
         .top-bar { width: 100%; display: flex; justify-content: center; }
-        .player-pills { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+        .player-pills { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; width: 100%; }
         .player-pill {
           display: flex; align-items: center; gap: 6px;
           padding: 6px 14px 6px 10px; border-radius: 999px; border: none;
@@ -811,15 +811,17 @@ class CoverMediaCard extends HTMLElement {
           transition: background .2s, color .2s;
           box-shadow: 0 1px 4px rgba(0,0,0,.25);
           max-width: calc(100% - var(--overlay-padding-x) * 2);
+          flex: 0 0 auto;
         }
         .player-pill span { overflow: hidden; text-overflow: ellipsis; }
         .player-pill:hover  { background: rgba(255,255,255,0.22); color: #fff; }
         .player-pill.active { background: var(--pill-active-bg); color: var(--pill-active-color); }
         .pill-cluster {
-          display: flex; align-items: center;
+          display: flex; align-items: center; flex: 0 1 auto;
           border-radius: 999px;
           box-shadow: 0 1px 4px rgba(0,0,0,.25);
           max-width: calc(100% - var(--overlay-padding-x) * 2);
+          min-width: 0;
         }
         .pill-cluster .player-pill { box-shadow: none; max-width: none; flex: 1 1 0; min-width: 0; }
         .player-pill.unavailable { opacity: 0.45; }
@@ -827,6 +829,7 @@ class CoverMediaCard extends HTMLElement {
         .player-pill ha-icon { --mdc-icon-size: 16px; flex-shrink: 0; }
         .pill-cluster .player-pill:not(:last-child) { border-radius: 999px 0 0 999px; }
         .pill-cluster .player-pill:not(:first-child) { border-radius: 0 999px 999px 0; }
+        .pill-cluster .player-pill:not(:first-child):not(:last-child) { border-radius: 0; }
 
         .center-area {
           display: flex; flex-direction: column; align-items: center;
@@ -973,7 +976,7 @@ class CoverMediaCard extends HTMLElement {
     const title    = this._attr('media_title') || '';
     const artist   = this._attr('media_artist') || this._attr('app_name') || '';
     const st       = this._state?.state;
-    const stateLabel = (!hasMedia && st && st !== 'playing' && st !== 'paused')
+    const stateLabel = (!title && !artist && st && st !== 'playing' && st !== 'paused')
       ? st.charAt(0).toUpperCase() + st.slice(1) : '';
 
     // title + artist → title / artist
@@ -1015,8 +1018,6 @@ class CoverMediaCard extends HTMLElement {
 
     // ── Art ───────────────────────────────────────────────
     const { artImg, cardAspect, overlay, mainControls, artPlaceholder, artPlaceholderIcon } = this._el;
-    // Compare the 'cache' param — changes when image changes, unlike the base path
-    const _cacheParam = (url) => url?.match(/[?&]cache=([^&]*)/)?.[1] ?? url?.split('?')[0] ?? '';
     const artBase = _cacheParam(artUrl);
     if (artUrl) {
       if (artBase !== this._lastArtBase) {
@@ -1049,24 +1050,23 @@ class CoverMediaCard extends HTMLElement {
 
     // ── Group operation success detection ─────────────────────
     if (this._groupExpect !== null) {
-      const grouped = (this._attr('group_members')?.length ?? 0) > 1;
+      const grouped = this._grouped;
       if (grouped === this._groupExpect) {
         clearTimeout(this._groupTimer);
         this._groupExpect = null;
         const haMembers   = this._attr('group_members') ?? [];
         const successNames = (grouped ? haMembers : [this._player])
-          .map(e => this._hass?.states[e]?.attributes?.friendly_name
-                  || e.split('.')[1]?.replace(/_/g, ' ') || e)
+          .map(e => _entityName(e, this._hass))
           .join(' · ');
         this._flashStatus(grouped ? 'Grouped' : 'Ungrouped', successNames, 2, 1500);
       }
     }
 
     // ── Rebuild buttons on feature, off/on, unavailable, or grouped state change ─────
-    const feats      = this._attr('supported_features') ?? 0xFFFFFFFF;
+    const feats      = this._attr('supported_features') ?? 0;
     const isOff      = st === 'off';
     const isUnavail  = st === 'unavailable' || st === 'unknown' || !st;
-    const grouped    = (this._attr('group_members')?.length ?? 0) > 1;
+    const grouped    = this._grouped;
     if (feats !== this._lastFeats || isOff !== this._lastIsOff || isUnavail !== this._lastIsUnavail || grouped !== this._lastGrouped) {
       this._lastFeats    = feats;
       this._lastIsOff    = isOff;
@@ -1078,7 +1078,7 @@ class CoverMediaCard extends HTMLElement {
     // ── Update button icons + toggle states ─────────────────
     const shuffle    = this._toggleVal('shuffle');
     const repeat     = this._toggleVal('repeat');
-    const btnStateKey = `${st}|${grouped}|${shuffle}|${repeat}`;
+    const btnStateKey = `${st}|${this._grouped}|${shuffle}|${repeat}`;
     if (btnStateKey !== this._lastBtnStateKey) {
       this._lastBtnStateKey = btnStateKey;
       this.shadowRoot.querySelectorAll('[data-btn-key]').forEach(btn => {
@@ -1086,7 +1086,7 @@ class CoverMediaCard extends HTMLElement {
         const def = BUTTON_DEFS[key];
         if (!def) return;
         if (key === 'group') {
-          btn.classList.toggle('active-toggle', grouped);
+          btn.classList.toggle('active-toggle', this._grouped);
         } else if (def.toggleAttr) {
           const val = this._toggleVal(def.toggleAttr);
           btn.classList.toggle('active-toggle', !!val && val !== 'off');
