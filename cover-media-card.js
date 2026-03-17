@@ -1380,7 +1380,7 @@ class CoverMediaCardEditor extends HTMLElement {
       rel:     'noopener noreferrer',
       textContent: `Cover Media Card v${CARD_VERSION}`,
     });
-    versionLink.style.cssText = 'display:block; margin-top:16px; font-size:11px; color:var(--secondary-text-color); text-decoration:none; text-align:center;';
+    versionLink.style.cssText = 'display:block; margin-top:16px; font-size:11px; color:var(--secondary-text-color); text-decoration:none; text-align:center; padding-bottom:8px;';
     versionLink.addEventListener('mouseover', () => versionLink.style.textDecoration = 'underline');
     versionLink.addEventListener('mouseout',  () => versionLink.style.textDecoration = 'none');
     root.appendChild(versionLink);
