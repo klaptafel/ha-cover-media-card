@@ -1374,6 +1374,17 @@ class CoverMediaCardEditor extends HTMLElement {
 
     root.appendChild(cs);
 
+    const versionLink = Object.assign(document.createElement('a'), {
+      href:    'https://github.com/klaptafel/ha-cover-media-card',
+      target:  '_blank',
+      rel:     'noopener noreferrer',
+      textContent: `Cover Media Card v${CARD_VERSION}`,
+    });
+    versionLink.style.cssText = 'display:block; margin-top:16px; font-size:11px; color:var(--secondary-text-color); text-decoration:none; text-align:center;';
+    versionLink.addEventListener('mouseover', () => versionLink.style.textDecoration = 'underline');
+    versionLink.addEventListener('mouseout',  () => versionLink.style.textDecoration = 'none');
+    root.appendChild(versionLink);
+
     this._pushFormData();
     this._renderButtonList();
   }
