@@ -78,7 +78,7 @@
  * in HA for time-based visibility.
  */
 
-const CARD_VERSION = '0.2.1';
+const CARD_VERSION = '0.2.3';
 
 const LONG_PRESS_MS   = 500;   // long press → more-info
 const PENDING_MS      = 2000;  // optimistic toggle pending window
@@ -626,12 +626,15 @@ class CoverMediaCard extends HTMLElement {
     if (!members.length && !this._grouped) return;
     const grouped = this._grouped;
 
-    // Build a readable list of all involved player names
+    // Build a readable list — use configured name if available, else friendly_name
     const allEntities = grouped
       ? (this._attr('group_members') ?? [])
       : [this._player, ...members];
     const memberNames = allEntities
-      .map(e => _entityName(e, this._hass))
+      .map(e => {
+        const idx = this._config.players.findIndex(p => p.entity === e);
+        return idx !== -1 ? this._playerName(idx) : _entityName(e, this._hass);
+      })
       .join(' · ');
 
     if (grouped) {
@@ -817,13 +820,13 @@ class CoverMediaCard extends HTMLElement {
         .player-pill:hover  { background: rgba(255,255,255,0.22); color: #fff; }
         .player-pill.active { background: var(--pill-active-bg); color: var(--pill-active-color); }
         .pill-cluster {
-          display: flex; align-items: center; flex: 0 1 auto;
+          display: flex; align-items: center; flex: 0 0 auto;
           border-radius: 999px;
           box-shadow: 0 1px 4px rgba(0,0,0,.25);
           max-width: calc(100% - var(--overlay-padding-x) * 2);
-          min-width: 0;
+          overflow: hidden;
         }
-        .pill-cluster .player-pill { box-shadow: none; max-width: none; flex: 1 1 0; min-width: 0; }
+        .pill-cluster .player-pill { box-shadow: none; max-width: none; flex: 1 1 auto; min-width: 0; }
         .player-pill.unavailable { opacity: 0.45; }
         .player-pill.unavailable:hover { background: rgba(255,255,255,0.22); color: #fff; }
         .player-pill ha-icon { --mdc-icon-size: 16px; flex-shrink: 0; }
@@ -1056,7 +1059,10 @@ class CoverMediaCard extends HTMLElement {
         this._groupExpect = null;
         const haMembers   = this._attr('group_members') ?? [];
         const successNames = (grouped ? haMembers : [this._player])
-          .map(e => _entityName(e, this._hass))
+          .map(e => {
+            const idx = this._config.players.findIndex(p => p.entity === e);
+            return idx !== -1 ? this._playerName(idx) : _entityName(e, this._hass);
+          })
           .join(' · ');
         this._flashStatus(grouped ? 'Grouped' : 'Ungrouped', successNames, 2, 1500);
       }
@@ -1127,7 +1133,9 @@ class CoverMediaCard extends HTMLElement {
   }
 }
 
-customElements.define('cover-media-card', CoverMediaCard);
+if (!customElements.get('cover-media-card')) {
+  customElements.define('cover-media-card', CoverMediaCard);
+}
 
 window.customCards = window.customCards || [];
 window.customCards.push({
@@ -1677,7 +1685,9 @@ class CoverMediaCardEditor extends HTMLElement {
 
 }
 
-customElements.define('cover-media-card-editor', CoverMediaCardEditor);
+if (!customElements.get('cover-media-card-editor')) {
+  customElements.define('cover-media-card-editor', CoverMediaCardEditor);
+}
 
 console.info(
   `%c COVER MEDIA CARD %c v${CARD_VERSION} `,
