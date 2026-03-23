@@ -21,7 +21,6 @@ A Home Assistant Lovelace card that turns your media players into a full-bleed c
 
 With YAML you can also configure:
 
-- **Grouping** — join or unjoin Sonos (and compatible) players directly from the card.
 - **Per-player buttons** — use a different button set for each player.
 - **Conditional visibility** — show or hide any button or player tab based on entity state.
 
@@ -39,7 +38,7 @@ With YAML you can also configure:
 
 ## Configuration
 
-The visual editor covers the most common setup: adding players, selecting buttons, and adjusting overlay behavior. Advanced options — grouping, per-player buttons, and conditional visibility — require YAML.
+The visual editor covers the most common setup: adding players, selecting buttons, and adjusting overlay behavior. Advanced options — per-player buttons and conditional visibility — require YAML.
 
 ### Minimal
 
@@ -66,7 +65,7 @@ players:
 
 `play_pause` `previous` `next` `volume_up` `volume_down` `shuffle` `repeat` `power` `group`
 
-The `group` button is hidden by default and auto-enabled when any player has `group_members` configured.
+The `group` button is hidden by default. To enable it, open a player in the editor and add one or more group members. Tapping the button joins all listed players; tapping again unjoins them. Works best between speakers of the same brand.
 
 ### Custom buttons
 
@@ -95,24 +94,6 @@ Supports any [HA tap action](https://www.home-assistant.io/dashboards/actions/).
 ---
 
 ## Advanced
-
-### Grouping
-
-Add `group_members` to a player to enable the group button. Tapping it joins all listed players. The overlay shows feedback while the operation is in progress.
-
-```yaml
-type: custom:cover-media-card
-players:
-  - entity: media_player.living_room
-    name: Living Room
-    group_members:
-      - media_player.kitchen
-      - media_player.bedroom
-  - entity: media_player.kitchen
-    name: Kitchen
-  - entity: media_player.bedroom
-    name: Bedroom
-```
 
 ### Per-player buttons
 
