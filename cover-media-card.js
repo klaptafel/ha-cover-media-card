@@ -53,6 +53,7 @@
  *   show_duration: 10              # seconds (default: 10)
  *   show_on_change: true           # default: true
  *   volume_step: 2                 # percent (default: 2)
+ *   auto_switch: 30               # seconds before auto-switching to a playing player (default: 0 = off)
  *
  * ─── Visibility conditions ───────────────────────────────────────────────────
  *
@@ -78,12 +79,12 @@
  * in HA for time-based visibility.
  */
 
-const CARD_VERSION = '0.2.3';
+const CARD_VERSION = '0.3.0';
 
 const LONG_PRESS_MS   = 500;   // long press → more-info
 const PENDING_MS      = 2000;  // optimistic toggle pending window
 const GROUP_WATCHDOG_MS = 8000; // group operation timeout
-const STATUS_MS         = 2000;  // default status flash duration
+const STATUS_MS              = 2000;  // default status flash duration
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Button definitions
@@ -103,6 +104,9 @@ const F = {
   REPEAT:       262144,
   GROUPING:     524288,
 };
+
+// Media content types where shuffle/repeat make no sense (live/linear streams)
+const LIVE_TYPES = new Set(['radio', 'channel', 'url']);
 
 const mkIcon = (mdi) => `<ha-icon icon="${mdi}"></ha-icon>`;
 const _entityName = (entity, hass) =>
@@ -157,14 +161,14 @@ const BUILTIN_KEYS_ORDERED = ['volume_down','volume_up','previous','play_pause',
 // Shared config normalisation (used by both card and editor)
 function _normalizeButtons(buttons) {
   const presentKeys = buttons
-    .map(b => typeof b === 'string' ? b : (b?.button || b?._disabled))
+    .map(b => typeof b === 'string' ? b : b?._disabled)
     .filter(Boolean);
   const missingKeys = BUILTIN_KEYS_ORDERED.filter(k => !presentKeys.includes(k));
   missingKeys.forEach(key => {
     const naturalIdx = BUILTIN_KEYS_ORDERED.indexOf(key);
     let insertAt = buttons.findIndex(
-      b => (typeof b === 'string' || b?._disabled || b?.button) &&
-           BUILTIN_KEYS_ORDERED.indexOf(b._disabled ?? b?.button ?? b) > naturalIdx
+      b => (typeof b === 'string' || b?._disabled) &&
+           BUILTIN_KEYS_ORDERED.indexOf(b._disabled ?? b) > naturalIdx
     );
     if (insertAt === -1) insertAt = buttons.length;
     buttons = [...buttons.slice(0, insertAt), { _disabled: key }, ...buttons.slice(insertAt)];
@@ -189,7 +193,7 @@ function _normalizeConfig(config) {
   }
 
   return { show_duration: 10, auto_hide: true, show_on_change: true,
-    aspect_ratio: 'auto', volume_step: 2, ...config, players, buttons };
+    aspect_ratio: 'auto', volume_step: 2, auto_switch: 0, ...config, players, buttons };
 }
 
 class CoverMediaCard extends HTMLElement {
@@ -205,11 +209,16 @@ class CoverMediaCard extends HTMLElement {
     this._hideTimer          = null;
     this._volTimer           = null;
     this._groupTimer         = null;
+    this._autoSwitchTimer    = null;
+    this._cooldownTimer      = null;
+    this._initialLoad        = true;
+    this._autoSwitchCooldown = false;
     this._showVol            = false;
     this._statusPriority     = 0;
+    this._configError        = false;
     this._groupExpect        = null;
-    this._groupAction        = null;
     this._lastActive         = false;
+    this._firstShow          = true;
     this._lastTitle          = null;
     this._lastFeats          = null;
     this._lastIsOff          = null;
@@ -219,12 +228,15 @@ class CoverMediaCard extends HTMLElement {
     this._lastIconIdx        = -1;
     this._lastArtBase        = '';
     this._lastHasArt         = null;
+    this._lastAspectPct      = null;
     this._lastTrackKey       = null;
     this._lastBtnStateKey    = null;
+    this._lastContentType    = null;
     this._pending            = {};
     this._visibleCache       = new Map();
     this._playerVisibleCache = new Map();
     this._lastState          = null;
+    this._trackAnim          = null;
   }
 
   // ── Config ──────────────────────────────────────────────────────────────────
@@ -238,7 +250,7 @@ class CoverMediaCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     const s    = hass?.states[this._player];
-    let stKey = `${s?.state}|${s?.attributes?.media_title}|${s?.attributes?.media_artist}|${s?.attributes?.app_name}`;
+    let stKey = `${s?.state}|${s?.attributes?.media_title}|${s?.attributes?.media_artist}|${s?.attributes?.app_name}|${s?.attributes?.media_content_type}`;
     // Watch all entities referenced in any visibility condition
     const _addEntities = (conds) => {
       if (!conds) return;
@@ -248,22 +260,28 @@ class CoverMediaCard extends HTMLElement {
         if (c?.conditions) _addEntities(c.conditions);
       });
     };
-    // Player-level visibility conditions
-    this._config.players?.forEach(p => _addEntities(p.visibility));
-    // Button visibility conditions — per-player overrides first, then global once
+    // Player-level visibility conditions + button overrides + auto_switch state tracking
     this._config.players?.forEach(p => {
+      _addEntities(p.visibility);
       if (p.buttons) p.buttons.forEach(b => _addEntities(b?.visibility));
+      if (this._config.auto_switch > 0) stKey += `|${p.entity}:${hass?.states[p.entity]?.state}`;
     });
     this._config.buttons?.forEach(b => _addEntities(b?.visibility));
     if (stKey !== this._lastState) {
       this._lastState = stKey;
       this._evalVisible();
+      if (this._config.auto_switch > 0) this._autoSwitch();
     }
     if (!this._rendered) this._render();
     else this._updateCard();
   }
 
-  getCardSize() { return 4; }
+  getCardSize() {
+    // Return size in 50px units. For square, paddingBottom is always 100% = width.
+    // For auto, we track the last applied ratio. Default to 4 (square-ish) until known.
+    if (this._config?.aspect_ratio !== 'auto') return 4;
+    return Math.round((this._lastAspectPct ?? 100) / 100 * 4);
+  }
 
   // ── Accessors ───────────────────────────────────────────────────────────────
 
@@ -290,7 +308,10 @@ class CoverMediaCard extends HTMLElement {
   }
   _playerIcon(i) {
     const p = this._config.players[i];
-    return p ? (this._hass?.states[p.entity]?.attributes?.icon || 'mdi:speaker-multiple') : 'mdi:speaker-multiple';
+    if (!p) return 'mdi:speaker-multiple';
+    return this._hass?.states[p.entity]?.attributes?.icon
+      || this._hass?.entities?.[p.entity]?.icon
+      || 'mdi:speaker-multiple';
   }
 
   // ── Visible templates ───────────────────────────────────────────────────────
@@ -393,15 +414,77 @@ class CoverMediaCard extends HTMLElement {
     this._hideTimer = null;
   }
   _scheduleHide() {
-    const isActive = this._state?.state === 'playing' || this._state?.state === 'paused';
+    const isActive = this._state?.state === 'playing';
     if (!isActive) return;
     clearTimeout(this._hideTimer);
     this._hideTimer = setTimeout(() => this._hideCtrl(), this._config.show_duration * 1000);
   }
   _toggleCtrl() {
-    const isActive = this._state?.state === 'playing' || this._state?.state === 'paused';
-    if (!isActive) return; // controls always visible without media
+    const isActive = this._state?.state === 'playing';
+    if (!isActive) {
+      // Overlay stays visible — pulse track info as feedback
+      const ca = this._el?.centerArea;
+      if (ca) {
+        ca.classList.remove('pulse');
+        void ca.offsetWidth; // force reflow to restart animation
+        ca.classList.add('pulse');
+        ca.addEventListener('animationend', () => ca.classList.remove('pulse'), { once: true });
+      }
+      return;
+    }
     this._ctrlVis ? this._hideCtrl() : this._showCtrl();
+  }
+
+  _findPlayingPlayer() {
+    return this._config.players.findIndex((p, i) =>
+      i !== this._playerIdx &&
+      this._playerVisibleCache.get(i) !== false &&
+      this._hass?.states[p.entity]?.state === 'playing'
+    );
+  }
+
+  _autoSwitch() {
+    const currentPlaying = this._state?.state === 'playing';
+
+    // Current player is playing — cancel everything, release cooldown
+    if (currentPlaying) {
+      clearTimeout(this._autoSwitchTimer);
+      this._autoSwitchTimer    = null;
+      this._autoSwitchCooldown = false;
+      return;
+    }
+
+    // Manual switch cooldown active — do nothing
+    if (this._autoSwitchCooldown) return;
+
+    // Find first visible playing player that isn't current
+    const playingIdx = this._findPlayingPlayer();
+
+    // No playing player found — cancel pending switch
+    if (playingIdx === -1) {
+      clearTimeout(this._autoSwitchTimer);
+      this._autoSwitchTimer = null;
+      return;
+    }
+
+    // Initial load — switch immediately without delay
+    if (this._initialLoad) {
+      this._initialLoad = false;
+      this._switchPlayer(playingIdx);
+      return;
+    }
+
+    // Timer already running — let it finish
+    if (this._autoSwitchTimer !== null) return;
+
+    // Start delay timer
+    this._autoSwitchTimer = setTimeout(() => {
+      this._autoSwitchTimer = null;
+      if (this._state?.state === 'playing') return;
+      if (this._autoSwitchCooldown) return;
+      const idx = this._findPlayingPlayer();
+      if (idx !== -1) this._switchPlayer(idx);
+    }, this._config.auto_switch * 1000);
   }
 
   // ── Player switching ────────────────────────────────────────────────────────
@@ -416,20 +499,23 @@ class CoverMediaCard extends HTMLElement {
     this._lastState       = null;
     this._showVol         = false;
     this._statusPriority  = 0;
+    this._configError     = false;
     clearTimeout(this._volTimer);
     this._groupExpect     = null;
-    this._groupAction     = null;
     clearTimeout(this._groupTimer);
+    clearTimeout(this._autoSwitchTimer);
+    this._autoSwitchTimer    = null;
     this._visibleCache.clear();
     this._playerVisibleCache.clear();
     this._pending         = {};
     this._lastIconIdx     = -1;
     this._lastArtBase     = '';
     this._lastHasArt      = null;
+    this._lastAspectPct   = null;
     this._lastTrackKey    = null;
     this._lastBtnStateKey = null;
+    this._lastContentType = null;
     this._lastPillKey     = null;
-    this._updatePills();
     this._updateCard();
     this._showCtrl();
     this._evalVisible();
@@ -469,13 +555,28 @@ class CoverMediaCard extends HTMLElement {
     const parts = [];
     clusters.forEach(cluster => {
       const grouped = cluster.length > 1;
+
+      // Sort cluster so coordinator (first in group_members) comes first
+      let sortedCluster = cluster;
+      if (grouped) {
+        const firstState = this._hass?.states[this._config.players[cluster[0]]?.entity];
+        const coordinator = firstState?.attributes?.group_members?.[0];
+        if (coordinator) {
+          const coordIdx = cluster.find(i => this._config.players[i]?.entity === coordinator);
+          if (coordIdx !== undefined && coordIdx !== cluster[0]) {
+            sortedCluster = [coordIdx, ...cluster.filter(i => i !== coordIdx)];
+          }
+        }
+      }
+
       if (grouped) parts.push('<div class="pill-cluster">');
 
-      cluster.forEach((i, ci) => {
+      sortedCluster.forEach((i, ci) => {
         const p           = this._config.players[i];
         const state       = this._hass?.states[p.entity];
         const unavailable = !state || state.state === 'unavailable';
         const active      = i === this._playerIdx;
+        const isCoord     = grouped && ci === 0;
         const classes     = ['player-pill', active && 'active', unavailable && 'unavailable'].filter(Boolean).join(' ');
         const icon        = unavailable ? 'mdi:help-circle-outline' : this._playerIcon(i);
 
@@ -497,8 +598,13 @@ class CoverMediaCard extends HTMLElement {
           }
         }
 
+        const isPlaying = this._hass?.states[p.entity]?.state === 'playing';
+        const showEq    = isPlaying && (!grouped || ci === 0);
+        const iconHtml  = showEq
+          ? '<div class="eq"><span></span><span></span><span></span></div>'
+          : (isCoord || !grouped ? `<ha-icon icon="${icon}"></ha-icon>` : '');
         parts.push(`<button class="${classes}" data-index="${i}">
-          <ha-icon icon="${icon}"></ha-icon>
+          ${iconHtml}
           <span>${pillLabel}</span>
         </button>`);
       });
@@ -593,7 +699,7 @@ class CoverMediaCard extends HTMLElement {
     if (!this._hass) return;
     const player  = this._config.players[this._playerIdx];
     const buttons = player?.buttons ?? this._config.buttons;
-    const customs = buttons.filter(b => b && typeof b === 'object' && !b._disabled && !b.button);
+    const customs = buttons.filter(b => b && typeof b === 'object' && !b._disabled);
     const btn = customs[ci];
     if (!btn?.tap_action) return;
     const action = btn.tap_action;
@@ -640,19 +746,17 @@ class CoverMediaCard extends HTMLElement {
     if (grouped) {
       this._hass.callService('media_player', 'unjoin', {}, { entity_id: this._player });
       this._groupExpect = false;
-      this._groupAction = 'unjoin';
       this._flashStatus('Ungrouping…', memberNames, 2, 9000);
     } else {
       this._hass.callService('media_player', 'join',
         { group_members: members }, { entity_id: this._player });
       this._groupExpect = true;
-      this._groupAction = 'join';
       this._flashStatus('Grouping…', memberNames, 2, 9000);
     }
     clearTimeout(this._groupTimer);
     this._groupTimer = setTimeout(() => {
       if (this._groupExpect === null) return; // already resolved
-      this._flashStatus(this._groupAction === 'join' ? 'Grouping failed' : 'Ungroup failed', memberNames, 2, 2500);
+      this._flashStatus(this._groupExpect ? 'Grouping failed' : 'Ungroup failed', memberNames, 2, 2500);
       // Keep _groupExpect set so we still catch a late HA confirmation
     }, GROUP_WATCHDOG_MS);
   }
@@ -669,17 +773,19 @@ class CoverMediaCard extends HTMLElement {
   // ── Active buttons ──────────────────────────────────────────────────────────
 
   _activeButtons() {
-    const st        = this._state?.state;
-    const isOff     = st === 'off';
-    const supported = this._attr('supported_features') ?? 0;
-    const player    = this._config.players[this._playerIdx];
-    const buttons   = player?.buttons ?? this._config.buttons;
+    const st          = this._state?.state;
+    const isOff       = st === 'off';
+    const supported   = this._attr('supported_features') ?? 0;
+    const contentType = this._attr('media_content_type') ?? '';
+    const isLive      = LIVE_TYPES.has(contentType);
+    const player      = this._config.players[this._playerIdx];
+    const buttons     = player?.buttons ?? this._config.buttons;
     const result = [];
     let ci = 0;
     if (st === 'unavailable' || st === 'unknown' || !st) return result;
     buttons.forEach((item, idx) => {
       if (item?._disabled) return;
-      const key = typeof item === 'string' ? item : item?.button;
+      const key = typeof item === 'string' ? item : null;
       if (key) {
         const def = BUTTON_DEFS[key];
         if (!def) return;
@@ -687,9 +793,16 @@ class CoverMediaCard extends HTMLElement {
         if (key === 'group') {
           const alreadyGrouped = this._grouped;
           if (!player?.group_members?.length && !alreadyGrouped) return;
+          // Skip feature check when group_members is configured — the F.GROUPING bit
+          // is unreliable for some integrations (e.g. apple_tv / AirPlay).
+          if (def.feature && (supported & def.feature) === 0 && !player?.group_members?.length) return;
+        } else {
+          // Hide shuffle and repeat for live/linear streams — feature bit may say
+          // supported but the operation is meaningless on radio/channel/url content.
+          if (isLive && (key === 'shuffle' || key === 'repeat')) return;
+          if (def.feature && (supported & def.feature) === 0) return;
         }
-        if (def.feature && (supported & def.feature) === 0) return;
-        if (item?.visibility !== undefined && this._visibleCache.get(idx) === false) return;
+        if (this._visibleCache.get(idx) === false) return;
         result.push({ key, ...def });
       } else if (item && typeof item === 'object') {
         if (this._visibleCache.get(idx) === false) { ci++; return; }
@@ -724,15 +837,22 @@ class CoverMediaCard extends HTMLElement {
     this._lastIsUnavail   = null;
     this._lastGrouped     = null;
     this._lastActive      = false;
+    this._firstShow       = true;
     this._lastState       = null;
     this._showVol         = false;
     this._statusPriority  = 0;
+    this._configError     = false;
     clearTimeout(this._pressTimer);
     clearTimeout(this._hideTimer);
     clearTimeout(this._volTimer);
     clearTimeout(this._groupTimer);
+    clearTimeout(this._autoSwitchTimer);
+    this._autoSwitchTimer    = null;
+    clearTimeout(this._cooldownTimer);
+    this._cooldownTimer      = null;
+    this._initialLoad        = true;
+    this._autoSwitchCooldown = false;
     this._groupExpect     = null;
-    this._groupAction     = null;
     this._pending         = {};
     this._visibleCache.clear();
     this._playerVisibleCache.clear();
@@ -741,8 +861,11 @@ class CoverMediaCard extends HTMLElement {
     this._lastIconIdx     = -1;
     this._lastArtBase     = '';
     this._lastHasArt      = null;
+    this._lastAspectPct   = null;
     this._lastTrackKey    = null;
     this._lastBtnStateKey = null;
+    this._lastContentType = null;
+    this._trackAnim       = null;
     const multi = this._config.players.length > 1;
     const st    = this._state?.state;
 
@@ -781,14 +904,15 @@ class CoverMediaCard extends HTMLElement {
 
         .art-placeholder {
           position: absolute; inset: 0;
-          display: flex; align-items: center; justify-content: center;
+          display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
           background: var(--placeholder-bg);
           opacity: 1; transition: opacity .3s ease;
+          padding: 24px; box-sizing: border-box;
         }
         .art-placeholder.hidden { opacity: 0; pointer-events: none; }
         .art-placeholder ha-icon {
           --mdc-icon-size: var(--placeholder-icon-size);
-          color: rgba(255,255,255,0.12);
+          color: rgba(255,255,255,.2);
         }
 
         /* ── Overlay ───────────────────────────────────── */
@@ -830,6 +954,12 @@ class CoverMediaCard extends HTMLElement {
         .player-pill.unavailable { opacity: 0.45; }
         .player-pill.unavailable:hover { background: rgba(255,255,255,0.22); color: #fff; }
         .player-pill ha-icon { --mdc-icon-size: 16px; flex-shrink: 0; }
+        .eq { display: inline-flex; align-items: center; justify-content: center; gap: 1.9px; height: 16px; width: 16px; flex-shrink: 0; vertical-align: middle; }
+        .eq span { display: block; width: 2px; border-radius: 1px; background: currentColor; animation: eq-bar 3.2s ease-in-out infinite; }
+        .eq span:nth-child(1) { animation-duration: 3.0s; animation-delay: 0.0s; }
+        .eq span:nth-child(2) { animation-duration: 3.8s; animation-delay: 0.7s; }
+        .eq span:nth-child(3) { animation-duration: 3.3s; animation-delay: 1.3s; }
+        @keyframes eq-bar { 0%, 100% { height: 2px; } 50% { height: 9px; } }
         .pill-cluster .player-pill:not(:last-child) { border-radius: 999px 0 0 999px; }
         .pill-cluster .player-pill:not(:first-child) { border-radius: 0 999px 999px 0; }
         .pill-cluster .player-pill:not(:first-child):not(:last-child) { border-radius: 0; }
@@ -838,16 +968,19 @@ class CoverMediaCard extends HTMLElement {
           display: flex; flex-direction: column; align-items: center;
           gap: 4px; width: 100%; padding: 0 8px; text-align: center;
           transition: opacity .25s ease;
+          flex: 1 1 0; min-height: 0; overflow: hidden; justify-content: center;
         }
+        @keyframes ca-pulse { 0%,100% { opacity:1; } 50% { opacity:.45; } }
+        .center-area.pulse { animation: ca-pulse .35s ease; }
         .track-title {
           font-size: clamp(20px,6.5vw,28px); font-weight: 700; color: #fff;
           text-shadow: 0 1px 8px rgba(0,0,0,.6); line-height: 1.2;
-          overflow-wrap: break-word; word-break: break-word; max-width: 100%;
+          word-break: break-word; max-width: 100%; overflow: hidden;
         }
         .track-artist {
           font-size: clamp(12px,3.5vw,16px); color: rgba(255,255,255,.75);
           text-shadow: 0 1px 4px rgba(0,0,0,.5);
-          overflow-wrap: break-word; word-break: break-word; max-width: 100%;
+          word-break: break-word; max-width: 100%; overflow: hidden;
         }
 
         .controls-wrap { width: 100%; }
@@ -907,7 +1040,10 @@ class CoverMediaCard extends HTMLElement {
     });
 
     // Long press on card → more-info
+    let _pressStartX = 0, _pressStartY = 0;
     inner.addEventListener('pointerdown', (e) => {
+      _pressStartX = e.clientX;
+      _pressStartY = e.clientY;
       if (e.target.closest('button')) return;
       this._pressTimer = setTimeout(() => {
         this._pressTimer = null;
@@ -917,7 +1053,9 @@ class CoverMediaCard extends HTMLElement {
     });
     const _cancelPress = () => { clearTimeout(this._pressTimer); this._pressTimer = null; };
     inner.addEventListener('pointerup',     _cancelPress);
-    inner.addEventListener('pointermove',   _cancelPress);
+    inner.addEventListener('pointermove',   (e) => {
+      if (Math.abs(e.clientX - _pressStartX) > 10 || Math.abs(e.clientY - _pressStartY) > 10) _cancelPress();
+    });
     inner.addEventListener('pointercancel', _cancelPress);
 
     // Delegate all control clicks
@@ -936,6 +1074,14 @@ class CoverMediaCard extends HTMLElement {
         const pill = e.target.closest('.player-pill');
         if (!pill) return;
         e.stopPropagation();
+        this._autoSwitchCooldown = true;
+        clearTimeout(this._autoSwitchTimer);
+        this._autoSwitchTimer = null;
+        clearTimeout(this._cooldownTimer);
+        this._cooldownTimer = setTimeout(() => {
+          this._autoSwitchCooldown = false;
+          this._cooldownTimer = null;
+        }, this._config.auto_switch * 1000);
         this._switchPlayer(parseInt(pill.dataset.index));
       });
     }
@@ -957,7 +1103,7 @@ class CoverMediaCard extends HTMLElement {
       trackArtist:      this.shadowRoot.querySelector('#trackArtist'),
       centerArea:       this.shadowRoot.querySelector('.center-area'),
       mainControls:     this.shadowRoot.querySelector('#mainControls'),
-      artPlaceholder:   this.shadowRoot.querySelector('#artPlaceholder'),
+      artPlaceholder:     this.shadowRoot.querySelector('#artPlaceholder'),
       artPlaceholderIcon: this.shadowRoot.querySelector('#artPlaceholderIcon'),
     };
   }
@@ -969,13 +1115,20 @@ class CoverMediaCard extends HTMLElement {
     }
     const { naturalWidth: w, naturalHeight: h } = img;
     if (!w || !h) return;
-    aspect.style.paddingBottom = `${Math.max(100, (h / w) * 100).toFixed(2)}%`;
+    const pct = Math.max(100, (h / w) * 100);
+    aspect.style.paddingBottom = `${pct.toFixed(2)}%`;
+    if (pct !== this._lastAspectPct) {
+      this._lastAspectPct = pct;
+      // Notify HA's masonry layout that our size changed
+      this.dispatchEvent(new Event('card-size-changed', { bubbles: true, composed: true }));
+    }
   }
 
   // ── Update ──────────────────────────────────────────────────────────────────
 
   _updateTrackInfo() {
     if (this._showVol) return;
+    if (this._configError) return;  // overlay already shows the error message
     const title    = this._attr('media_title') || '';
     const artist   = this._attr('media_artist') || this._attr('app_name') || '';
     const st       = this._state?.state;
@@ -1003,18 +1156,58 @@ class CoverMediaCard extends HTMLElement {
     const ca = this._el?.centerArea;
     if (wasNull || !ca || !this._ctrlVis) { write(); return; }
 
-    ca.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150, easing: 'ease' })
-      .onfinish = () => {
-        write();
-        ca.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: 'ease' });
-      };
+    if (this._trackAnim) { this._trackAnim.cancel(); this._trackAnim = null; }
+    this._trackAnim = ca.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150, easing: 'ease' });
+    this._trackAnim.onfinish = () => {
+      write();
+      this._trackAnim = ca.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: 'ease' });
+      this._trackAnim.onfinish = () => { this._trackAnim = null; };
+    };
+  }
+
+  _updateConfigError() {
+    const players = this._config.players;
+    let title = '', sub = '';
+
+    if (!players.length) {
+      title = 'No player configured';
+      sub   = 'Add a media player in the card editor';
+    } else {
+      const missing = players.filter(p => p.entity && !this._hass?.states[p.entity]);
+      if (missing.length === players.length) {
+        title = missing.length === 1 ? 'Player not found' : 'Players not found';
+        sub   = missing.map(p => p.name || p.entity).join(', ');
+      } else if (missing.length > 0) {
+        title = 'Some players not found';
+        sub   = missing.map(p => p.name || p.entity).join(', ');
+      }
+    }
+
+    const hasError = !!title;
+    this._configError = hasError;
+
+    // Reuse the normal overlay title/artist elements — same styling, same position
+    if (hasError && !this._showVol) {
+      if (this._el?.trackTitle)  this._el.trackTitle.textContent  = title;
+      if (this._el?.trackArtist) {
+        this._el.trackArtist.textContent   = sub;
+        this._el.trackArtist.style.display = sub ? '' : 'none';
+      }
+      // Show overlay without starting auto-hide
+      this._el?.overlay?.classList.add('visible');
+    }
+
+    // Keep placeholder icon visible; hide art
+    if (this._el?.artPlaceholder) {
+      this._el.artPlaceholder.classList.toggle('hidden', !hasError && !!this._lastArtBase);
+    }
   }
 
   _updateCard() {
     if (!this._rendered) return;
 
     const st       = this._state?.state;
-    const isActive = st === 'playing' || st === 'paused';
+    const isActive = st === 'playing';
     // Ignore stale entity_picture when unavailable — HA keeps old value after disconnect
     const artUrl   = (st === 'unavailable' || st === 'unknown' || !st) ? null : this._attr('entity_picture');
     const title    = this._attr('media_title') || '';
@@ -1049,6 +1242,7 @@ class CoverMediaCard extends HTMLElement {
       }
     }
 
+    this._updateConfigError();
     this._updateTrackInfo();
 
     // ── Group operation success detection ─────────────────────
@@ -1068,16 +1262,18 @@ class CoverMediaCard extends HTMLElement {
       }
     }
 
-    // ── Rebuild buttons on feature, off/on, unavailable, or grouped state change ─────
-    const feats      = this._attr('supported_features') ?? 0;
-    const isOff      = st === 'off';
-    const isUnavail  = st === 'unavailable' || st === 'unknown' || !st;
-    const grouped    = this._grouped;
-    if (feats !== this._lastFeats || isOff !== this._lastIsOff || isUnavail !== this._lastIsUnavail || grouped !== this._lastGrouped) {
-      this._lastFeats    = feats;
-      this._lastIsOff    = isOff;
-      this._lastIsUnavail = isUnavail;
-      this._lastGrouped  = grouped;
+    // ── Rebuild buttons on feature, off/on, unavailable, grouped, or content type change ─────
+    const feats       = this._attr('supported_features') ?? 0;
+    const isOff       = st === 'off';
+    const isUnavail   = st === 'unavailable' || st === 'unknown' || !st;
+    const grouped     = this._grouped;
+    const contentType = this._attr('media_content_type') ?? '';
+    if (feats !== this._lastFeats || isOff !== this._lastIsOff || isUnavail !== this._lastIsUnavail || grouped !== this._lastGrouped || contentType !== this._lastContentType) {
+      this._lastFeats       = feats;
+      this._lastIsOff       = isOff;
+      this._lastIsUnavail   = isUnavail;
+      this._lastGrouped     = grouped;
+      this._lastContentType = contentType;
       if (mainControls) mainControls.innerHTML = this._activeButtons().map(b => this._btnHtml(b, st)).join('');
     }
 
@@ -1109,7 +1305,12 @@ class CoverMediaCard extends HTMLElement {
       clearTimeout(this._hideTimer);
       if (!this._ctrlVis) {
         this._ctrlVis = true;
-        overlay?.classList.add('visible');
+        if (this._firstShow) {
+          this._firstShow = false;
+          requestAnimationFrame(() => overlay?.classList.add('visible'));
+        } else {
+          overlay?.classList.add('visible');
+        }
       }
     } else if (!this._lastActive) {
       // Transition inactive → active: start auto-hide timer
@@ -1150,14 +1351,14 @@ window.customCards.push({
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ALL_BUTTONS_INFO = [
-  { key: 'volume_down', label: 'Volume down',  icon: 'mdi:volume-minus' },
-  { key: 'volume_up',   label: 'Volume up',    icon: 'mdi:volume-plus' },
-  { key: 'previous',    label: 'Previous',     icon: 'mdi:skip-previous' },
-  { key: 'play_pause',  label: 'Play / Pause', icon: 'mdi:play-pause' },
-  { key: 'next',        label: 'Next',         icon: 'mdi:skip-next' },
-  { key: 'shuffle',     label: 'Shuffle',      icon: 'mdi:shuffle' },
-  { key: 'repeat',      label: 'Repeat',       icon: 'mdi:repeat' },
-  { key: 'power',       label: 'Power',        icon: 'mdi:power' },
+  { key: 'volume_down', label: 'Volume down',  icon: 'mdi:volume-minus'     },
+  { key: 'volume_up',   label: 'Volume up',    icon: 'mdi:volume-plus'      },
+  { key: 'previous',    label: 'Previous',     icon: 'mdi:skip-previous'    },
+  { key: 'play_pause',  label: 'Play / Pause', icon: 'mdi:play-pause'       },
+  { key: 'next',        label: 'Next',         icon: 'mdi:skip-next'        },
+  { key: 'shuffle',     label: 'Shuffle',      icon: 'mdi:shuffle'          },
+  { key: 'repeat',      label: 'Repeat',       icon: 'mdi:repeat'           },
+  { key: 'power',       label: 'Power',        icon: 'mdi:power'            },
   { key: 'group',       label: 'Group',        icon: 'mdi:speaker-multiple' },
 ];
 
@@ -1165,50 +1366,78 @@ class CoverMediaCardEditor extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
-    this._config    = null;
-    this._hass      = null;
-    this._built     = false;
-    this._expanded  = {};
+    this._config         = null;
+    this._hass           = null;
+    this._built          = false;
+    this._ownFire        = false;
+    this._tab            = 'players';
+    this._playerExpanded = {};
+    this._btnExpanded    = {};
   }
 
   set hass(hass) {
     this._hass = hass;
-    if (this._playersForm) this._playersForm.hass = hass;
-    this.shadowRoot.querySelectorAll('.btn-form').forEach(f => { f.hass = hass; });
+    this.shadowRoot.querySelectorAll('ha-form').forEach(f => { f.hass = hass; });
   }
 
   setConfig(config) {
+    if (!this._built) {
+      this._config = _normalizeConfig(config);
+      this._init();
+      return;
+    }
+    // When the change came from our own _fire(), HA calls back with the stripped
+    // config (no _disabled). Don't overwrite our internal state — it has the full
+    // editor representation including _disabled for correct drag-and-drop order.
+    if (this._ownFire) { this._ownFire = false; return; }
     this._config = _normalizeConfig(config);
-    if (!this._built) { this._init(); return; }
-    this._pushFormData();
-    this._renderButtonList();
+    this._renderTab();
   }
 
+  // ── Config output ──────────────────────────────────────────────────────────
+
+  // Saves config to HA. Does NOT re-render — use for text inputs to preserve focus.
   _fire(config) {
     this._config = config;
-    const DEFAULTS = { show_duration: 10, auto_hide: true, show_on_change: true, aspect_ratio: 'auto', volume_step: 2 };
-    const cleanButtons = (btns) => (btns || []).filter(b => !b?._disabled);
+    const DEFAULTS = { show_duration: 10, auto_hide: true, show_on_change: true,
+      aspect_ratio: 'auto', volume_step: 2, auto_switch: 0 };
+    const cleanBtns = (btns) => (btns || []).filter(b => !b?._disabled);
     const clean = {
       ...config,
-      buttons: cleanButtons(config.buttons),
+      buttons: cleanBtns(config.buttons),
       players: (config.players || []).map(p => {
         if (!p.buttons) return p;
-        const cleaned = cleanButtons(p.buttons);
-        if (!cleaned.length) { const { buttons: _b, ...rest } = p; return rest; }
-        return { ...p, buttons: cleaned };
+        const cleaned = cleanBtns(p.buttons);
+        const { buttons: _, ...rest } = p;
+        return cleaned.length ? { ...rest, buttons: cleaned } : rest;
       }),
     };
     for (const [k, v] of Object.entries(DEFAULTS)) {
       if (clean[k] === v) delete clean[k];
     }
+    // Enforce key order: players → buttons → settings (mirrors the GUI tab order).
+    const KEY_ORDER = ['players', 'buttons', 'aspect_ratio', 'volume_step',
+      'auto_hide', 'show_duration', 'show_on_change', 'auto_switch'];
+    const ordered = {};
+    for (const k of KEY_ORDER)          if (k in clean) ordered[k] = clean[k];
+    for (const k of Object.keys(clean)) if (!(k in ordered)) ordered[k] = clean[k];
+    this._ownFire = true;
+    // Fallback: clear flag if HA never calls setConfig back (e.g. on YAML errors).
+    setTimeout(() => { this._ownFire = false; }, 500);
     this.dispatchEvent(new CustomEvent('config-changed',
-      { detail: { config: clean }, bubbles: true, composed: true }));
+      { detail: { config: ordered }, bubbles: true, composed: true }));
   }
 
-  // ── Build DOM once ──────────────────────────────────────────────────────────
+  // Saves config and re-renders the current tab. Use for structural changes
+  // (toggles that affect visible rows, delete, add, drag). Text inputs use _fire().
+  _fireAndRender(config) {
+    this._fire(config);
+    this._renderTab();
+  }
+
+  // ── Shell (built once) ─────────────────────────────────────────────────────
 
   _init() {
-    if (!this._config) return;
     this._built = true;
     const root  = this.shadowRoot;
 
@@ -1216,381 +1445,757 @@ class CoverMediaCardEditor extends HTMLElement {
       :host { display: block; }
       ha-form { display: block; }
 
-      .settings-rows { display: flex; flex-direction: column; }
-      .srow {
-        display: flex; align-items: center; justify-content: space-between;
-        min-height: 48px; padding: 4px 0;
+      /* ── Outer card ── */
+      .editor-card {
+        border: 1px solid var(--divider-color);
+        border-radius: var(--ha-card-border-radius, 12px);
+        overflow: hidden;
+        background: var(--ha-card-background, var(--card-background-color, #fff));
+      }
+
+      /* ── Tab bar ── */
+      .tab-bar {
+        display: flex;
         border-bottom: 1px solid var(--divider-color);
       }
-      .srow:last-child { border-bottom: none; }
-      .srow-label { font-size: 14px; color: var(--primary-text-color); flex: 1; }
-      .srow-radio-group { padding: 4px 0 2px; border-bottom: 1px solid var(--divider-color); }
-      .srow-radio-group:last-child { border-bottom: none; }
-      .srow-radio-label {
-        font-size: 14px; color: var(--primary-text-color);
-        padding: 8px 0 4px;
+      .tab-btn {
+        flex: 1; padding: 12px 4px; border: none; background: none;
+        font-family: inherit; font-size: 13px; font-weight: 500;
+        color: var(--secondary-text-color); cursor: pointer;
+        border-bottom: 2px solid transparent; margin-bottom: -1px;
+        transition: color .15s, border-color .15s;
       }
-      .srow-radio-group ha-formfield { display: block; margin-left: -8px; }
-      .srow ha-textfield { width: 96px; --text-field-padding: 0 8px; }
-      .srow ha-textfield::part(root) { height: 36px; }
-      .srow ha-textfield::part(input) { height: 36px; }
+      .tab-btn:hover  { color: var(--primary-text-color); }
+      .tab-btn.active { color: var(--primary-color); border-bottom-color: var(--primary-color); font-weight: 600; }
 
-      .section-header {
-        font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
-        color: var(--secondary-text-color); border-bottom: 1px solid var(--divider-color);
-        padding-bottom: 6px; margin: 24px 0 8px;
+      /* ── Tab content ── */
+      .tab-content { padding: 20px 16px 16px; }
+
+      /* ── Item list ── */
+      .item-list { display: flex; flex-direction: column; gap: 8px; }
+
+      /* ── Drop indicator ── */
+      .drop-indicator {
+        height: 2px; border-radius: 1px;
+        background: var(--primary-color);
+        pointer-events: none;
+        margin: -1px 8px;
       }
-      /* First header in the editor root needs no top margin */
-      :host > .section-header { margin-top: 0; }
 
-      .btn-list { display: flex; flex-direction: column; }
-      .btn-row {
-        display: flex; align-items: center; gap: 10px;
-        height: 48px; border-bottom: 1px solid var(--divider-color);
+      /* ── Drag ghost (touch) ── */
+      .drag-ghost {
+        position: fixed; pointer-events: none; z-index: 9999;
+        opacity: .85; box-shadow: 0 4px 16px rgba(0,0,0,.2);
+        border-radius: 8px; background: var(--ha-card-background, #fff);
+        border: 1px solid var(--primary-color);
+        transform: scale(1.02);
+        transition: none;
       }
-      .btn-row:last-child { border-bottom: none; }
 
-      .btn-row-icon { --mdc-icon-size: 20px; flex-shrink: 0; width: 24px;
-        color: var(--secondary-text-color); }
-      .btn-row.enabled .btn-row-icon { color: var(--primary-text-color); }
+      /* ── Item entry (card) ── */
+      .item-entry {
+        border: 1px solid var(--divider-color);
+        border-radius: 8px;
+        overflow: hidden;
+        transition: opacity .15s;
+      }
+      .item-entry.disabled-entry {
+        background: var(--secondary-background-color, rgba(0,0,0,.03));
+      }
+      .item-entry.open-entry {
+        border-color: var(--primary-color);
+      }
+      .item-entry.dragging { opacity: .3; }
 
-      .btn-row-label { flex: 1; font-size: 14px; color: var(--secondary-text-color);
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .btn-row.enabled .btn-row-label { color: var(--primary-text-color); }
+      /* ── Item row ── */
+      .item-row {
+        display: flex; align-items: center; gap: 6px;
+        min-height: 52px; padding: 0 6px 0 4px;
+      }
 
-      .btn-arrows { display: flex; flex-shrink: 0; }
-      .btn-arrows ha-icon-button { --mdc-icon-button-size: 30px; --mdc-icon-size: 16px;
-        color: var(--secondary-text-color); }
-      .btn-arrows ha-icon-button[disabled] { opacity: .25; pointer-events: none; }
+      .drag-handle {
+        display: flex; align-items: center; padding: 0 2px;
+        color: var(--secondary-text-color); opacity: .4;
+        cursor: grab; flex-shrink: 0;
+      }
+      .drag-handle:focus { outline: none; opacity: .8; }
+      .drag-handle ha-icon { --mdc-icon-size: 18px; }
 
-      .row-action { width: 36px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+      .row-icon { --mdc-icon-size: 20px; flex-shrink: 0; width: 24px; color: var(--secondary-text-color); }
+      .item-entry:not(.disabled-entry) .row-icon { color: var(--primary-text-color); }
+
+      .row-label-wrap { flex: 1; min-width: 0; }
+      .row-label {
+        flex: 1; font-size: 14px; color: var(--secondary-text-color);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .item-entry:not(.disabled-entry) .row-label { color: var(--primary-text-color); }
+      .row-sub { font-size: 11px; color: var(--secondary-text-color); margin-top: 1px; opacity: .65; }
+
+      .row-action {
+        width: 36px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+      }
       ha-switch { flex-shrink: 0; }
-      .expand-btn { --mdc-icon-button-size: 36px; --mdc-icon-size: 18px;
-        flex-shrink: 0; color: var(--secondary-text-color); }
+      .expand-btn { --mdc-icon-button-size: 36px; --mdc-icon-size: 18px; color: var(--secondary-text-color); }
+      .delete-btn { --mdc-icon-button-size: 36px; --mdc-icon-size: 18px; color: var(--secondary-text-color); }
+      .delete-btn:hover { color: var(--error-color, #db4437); }
 
-      .cb-body { display: none; }
-      .cb-body.open { display: block; }
-      .cb-body-inner {
-        margin-left: 34px; margin-bottom: 4px;
-        border-left: 3px solid var(--divider-color);
-        padding: 8px 0 4px 12px;
-      }
-      .cb-sub-label {
+      /* ── Expanded body ── */
+      .item-body { padding: 4px 12px 14px; }
+      .body-label {
         font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
-        color: var(--secondary-text-color); margin: 14px 0 4px;
+        color: var(--secondary-text-color); margin: 16px 0 4px;
       }
-      .cb-sub-label:first-child { margin-top: 0; }
-      .cb-divider { border: none; border-top: 1px solid var(--divider-color); margin: 12px 0; }
-      .cb-delete {
-        display: block; width: 100%; margin-top: 8px;
-        padding: 4px 0 4px 34px; border: none; background: none; cursor: pointer;
-        font-size: 13px; color: var(--error-color, #db4437);
-        text-align: left; font-family: inherit;
+      .body-label:first-child { margin-top: 8px; }
+      .body-label-sub {
+        font-size: 11px; color: var(--secondary-text-color); opacity: .7;
+        margin: -2px 0 4px;
       }
-      .cb-delete:hover { text-decoration: underline; }
-
-      .empty-state {
-        font-size: 13px; color: var(--secondary-text-color);
-        margin: 6px 0 0; padding: 0; font-style: italic;
+      .btn-hint {
+        font-size: 12px; color: var(--secondary-text-color);
+        display: flex; align-items: center; gap: 4px; margin-top: 6px; opacity: .8;
       }
-      .empty-state.hidden { display: none; }
+      .btn-hint ha-icon { --mdc-icon-size: 14px; }
 
-      /* Config section gets top breathing room from players form */
-      .config-section { margin-top: 8px; }
-
-      .settings-sub-label {
-        font-size: 11px; font-weight: 600; color: var(--secondary-text-color);
-        margin: 16px 0 2px; letter-spacing: .03em;
+      /* ── Add section ── */
+      .add-section { margin-top: 16px; }
+      .add-label {
+        font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+        color: var(--secondary-text-color); margin-bottom: 4px;
       }
-      .settings-sub-label:first-of-type { margin-top: 4px; }
+      ha-button { display: block; }
+      .empty-state { font-size: 13px; color: var(--secondary-text-color); margin: 0 0 16px; font-style: italic; }
 
-      ha-button { display: block; margin-top: 12px; }
+      /* ── Settings ── */
+      .section-label {
+        font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+        color: var(--secondary-text-color); margin: 28px 0 0;
+      }
+      .section-label:first-child { margin-top: 0; }
+      .settings-group { margin-top: 8px; }
+      .srow {
+        display: flex; align-items: center; justify-content: space-between;
+        min-height: 48px; padding: 4px 2px; border-bottom: 1px solid var(--divider-color);
+      }
+      .settings-group .srow:last-child,
+      .settings-group .radio-group:last-child { border-bottom: none; }
+      .srow.srow-disabled { opacity: .45; pointer-events: none; }
+      .srow-text { flex: 1; }
+      .srow-label { font-size: 14px; color: var(--primary-text-color); display: block; }
+      .srow-desc  { font-size: 12px; color: var(--secondary-text-color); display: block; margin-top: 1px; }
+      .srow ha-textfield { width: 96px; --text-field-padding: 0 8px; }
+      .srow ha-textfield::part(root)  { height: 36px; }
+      .srow ha-textfield::part(input) { height: 36px; }
+      .radio-group { padding: 4px 2px 8px; border-bottom: 1px solid var(--divider-color); }
+      .radio-label { font-size: 14px; color: var(--primary-text-color); padding: 8px 0 4px; }
+      .radio-group ha-formfield { display: block; margin-left: -8px; }
+
+      /* ── Version link ── */
+      .version-link {
+        display: block; font-size: 11px; color: var(--secondary-text-color);
+        text-decoration: none; text-align: center;
+        padding: 10px 16px 12px;
+        border-top: 1px solid var(--divider-color);
+      }
+      .version-link:hover { text-decoration: underline; }
     ` }));
 
-    // ── Players ─────────────────────────────────────────────
-    root.appendChild(Object.assign(document.createElement('div'),
-      { className: 'section-header', textContent: 'Media Players' }));
+    const card = document.createElement('div');
+    card.className = 'editor-card';
 
-    this._playersForm = document.createElement('ha-form');
-    this._playersForm.schema = [{ name: 'players',
-      selector: { entity: { multiple: true, domain: 'media_player' } } }];
-    this._playersForm.computeLabel = () => '';
-    if (this._hass) this._playersForm.hass = this._hass;
-    this._playersForm.addEventListener('value-changed', (e) => {
-      const entities = e.detail.value.players || [];
-      // Preserve existing player objects (name/group_members/buttons), only reorder/add/remove
-      const existing = this._config.players;
-      const players  = entities.map(entity => existing.find(p => p.entity === entity) || { entity });
-      this._fire({ ...this._config, players });
-      this._updateEmptyState();
+    const tabBar = document.createElement('div');
+    tabBar.className = 'tab-bar';
+    [['players', 'Players'], ['buttons', 'Buttons'], ['settings', 'Settings']].forEach(([id, label]) => {
+      const btn = Object.assign(document.createElement('button'), {
+        className:   'tab-btn' + (id === this._tab ? ' active' : ''),
+        textContent: label,
+      });
+      btn.dataset.tab = id;
+      btn.addEventListener('click', () => {
+        if (this._tab === id) return;
+        this._tab = id;
+        tabBar.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === id));
+        this._renderTab();
+      });
+      tabBar.appendChild(btn);
     });
-    root.appendChild(this._playersForm);
+    card.appendChild(tabBar);
 
-    this._emptyState = Object.assign(document.createElement('p'), {
-      className: 'empty-state',
-      textContent: 'Add at least one media player to get started.',
-    });
-    root.appendChild(this._emptyState);
+    this._content = document.createElement('div');
+    this._content.className = 'tab-content';
+    card.appendChild(this._content);
 
-    // ── Buttons ──────────────────────────────────────────────
-    this._configSection = document.createElement('div');
-    this._configSection.className = 'config-section';
-    const cs = this._configSection;
-
-    cs.appendChild(Object.assign(document.createElement('div'),
-      { className: 'section-header', textContent: 'Buttons' }));
-    this._btnList = document.createElement('div');
-    this._btnList.className = 'btn-list';
-    cs.appendChild(this._btnList);
-
-    const addBtn = document.createElement('ha-button');
-    addBtn.textContent = 'Add custom button';
-    addBtn.addEventListener('click', () => {
-      const newItem = { icon: 'mdi:information-outline', label: 'More info',
-        tap_action: { action: 'more-info' } };
-      const buttons = [...(this._config.buttons || []), newItem];
-      this._expanded[buttons.length - 1] = true;
-      this._fire({ ...this._config, buttons });
-      this._renderButtonList();
-    });
-    cs.appendChild(addBtn);
-
-    // ── Settings ─────────────────────────────────────────────
-    cs.appendChild(Object.assign(document.createElement('div'),
-      { className: 'section-header', textContent: 'Settings' }));
-
-    const mkSubLabel = (text) => Object.assign(document.createElement('div'),
-      { className: 'settings-sub-label', textContent: text });
-
-    cs.appendChild(mkSubLabel('General'));
-    this._generalRows = document.createElement('div');
-    this._generalRows.className = 'settings-rows';
-    cs.appendChild(this._generalRows);
-
-    cs.appendChild(mkSubLabel('Overlay'));
-    this._overlayRows = document.createElement('div');
-    this._overlayRows.className = 'settings-rows';
-    cs.appendChild(this._overlayRows);
-
-    root.appendChild(cs);
-
-    const versionLink = Object.assign(document.createElement('a'), {
-      href:    'https://github.com/klaptafel/ha-cover-media-card',
-      target:  '_blank',
-      rel:     'noopener noreferrer',
+    card.appendChild(Object.assign(document.createElement('a'), {
+      href:        'https://github.com/klaptafel/ha-cover-media-card',
+      target:      '_blank',
+      rel:         'noopener noreferrer',
+      className:   'version-link',
       textContent: `Cover Media Card v${CARD_VERSION}`,
-    });
-    versionLink.style.cssText = 'display:block; margin-top:16px; font-size:11px; color:var(--secondary-text-color); text-decoration:none; text-align:center; padding-bottom:8px;';
-    versionLink.addEventListener('mouseover', () => versionLink.style.textDecoration = 'underline');
-    versionLink.addEventListener('mouseout',  () => versionLink.style.textDecoration = 'none');
-    root.appendChild(versionLink);
+    }));
 
-    this._pushFormData();
-    this._renderButtonList();
+    root.appendChild(card);
+    this._renderTab();
   }
 
-  // ── Settings rendering ───────────────────────────────────────────────────────
+  // ── Tab dispatch ───────────────────────────────────────────────────────────
 
-  _mkSelectRow(label, key, options) {
+  _renderTab() {
+    this._content.innerHTML = '';
+    // Trim expanded states to actual array lengths to avoid stale keys
+    const playerCount = this._config.players.length;
+    const btnCount    = this._config.buttons.length;
+    Object.keys(this._playerExpanded).forEach(k => { if (parseInt(k) >= playerCount) delete this._playerExpanded[k]; });
+    Object.keys(this._btnExpanded).forEach(k    => { if (parseInt(k) >= btnCount)    delete this._btnExpanded[k]; });
+    if      (this._tab === 'players')  this._renderPlayers();
+    else if (this._tab === 'buttons')  this._renderButtons();
+    else                               this._renderSettings();
+    if (this._hass) this.shadowRoot.querySelectorAll('ha-form').forEach(f => { f.hass = this._hass; });
+  }
+
+  // ── DOM helpers ────────────────────────────────────────────────────────────
+
+  _mkDragHandle() {
     const wrap = document.createElement('div');
-    wrap.className = 'srow-radio-group';
-    const groupLabel = Object.assign(document.createElement('div'),
-      { className: 'srow-radio-label', textContent: label });
-    wrap.appendChild(groupLabel);
-    const cur = this._config[key] ?? options[0].value;
-    options.forEach(({ value, label: optLabel }) => {
-      const formfield = document.createElement('ha-formfield');
-      formfield.setAttribute('label', optLabel);
-      const radio = document.createElement('ha-radio');
-      radio.setAttribute('name', key);
-      radio.setAttribute('value', value);
-      if (value === cur) radio.setAttribute('checked', '');
-      radio.addEventListener('change', () => {
-        if (!radio.checked) return;
-        this._config = { ...this._config, [key]: value };
-        this._fire(this._config);
-        // uncheck siblings
-        wrap.querySelectorAll(`ha-radio[name="${key}"]`).forEach(r => {
-          if (r !== radio) r.removeAttribute('checked');
-        });
-      });
-      formfield.appendChild(radio);
-      wrap.appendChild(formfield);
-    });
+    wrap.className = 'drag-handle';
+    const ico = document.createElement('ha-icon');
+    ico.setAttribute('icon', 'mdi:drag-vertical');
+    wrap.appendChild(ico);
     return wrap;
   }
-  _mkToggleRow(label, key) {
+
+  _mkExpandBtn(isOpen) {
+    const wrap = document.createElement('div');
+    wrap.className = 'row-action';
+    const btn = document.createElement('ha-icon-button');
+    btn.className = 'expand-btn';
+    const ico = document.createElement('ha-icon');
+    ico.setAttribute('icon', isOpen ? 'mdi:chevron-up' : 'mdi:chevron-down');
+    btn.appendChild(ico);
+    wrap.appendChild(btn);
+    return { wrap, btn, ico };
+  }
+
+  _mkDeleteBtn(onClick) {
+    const wrap = document.createElement('div');
+    wrap.className = 'row-action';
+    const btn = document.createElement('ha-icon-button');
+    btn.className = 'delete-btn';
+    const ico = document.createElement('ha-icon');
+    ico.setAttribute('icon', 'mdi:delete-outline');
+    btn.appendChild(ico);
+    btn.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+    wrap.appendChild(btn);
+    return wrap;
+  }
+
+  // label: visible text. key: config key. rerender: call _fireAndRender instead of _fire.
+  // description: helper text. disabled: greys out row. disabledReason: replaces description when disabled.
+  _mkToggleRow(label, key, { defaultVal = true, rerender = false, description = null, disabled = false, disabledReason = null } = {}) {
     const row = document.createElement('div');
-    row.className = 'srow';
-    const lbl = Object.assign(document.createElement('span'), { className: 'srow-label', textContent: label });
-    const sw  = document.createElement('ha-switch');
-    sw.checked = !!(this._config[key] ?? true);
-    sw.addEventListener('change', () => {
-      this._config = { ...this._config, [key]: sw.checked };
-      this._fire(this._config);
-      this._renderSettings();
-    });
-    row.appendChild(lbl);
+    row.className = 'srow' + (disabled ? ' srow-disabled' : '');
+
+    const textWrap = document.createElement('div');
+    textWrap.className = 'srow-text';
+    textWrap.appendChild(Object.assign(document.createElement('span'), { className: 'srow-label', textContent: label }));
+    const desc = disabled ? disabledReason : description;
+    if (desc) {
+      textWrap.appendChild(Object.assign(document.createElement('span'), { className: 'srow-desc', textContent: desc }));
+    }
+    row.appendChild(textWrap);
+
+    const sw = document.createElement('ha-switch');
+    sw.checked = !!(this._config[key] ?? defaultVal);
+    if (disabled) {
+      sw.setAttribute('disabled', '');
+    } else {
+      sw.addEventListener('change', () => {
+        const cfg = { ...this._config, [key]: sw.checked };
+        rerender ? this._fireAndRender(cfg) : this._fire(cfg);
+      });
+    }
     row.appendChild(sw);
     return row;
   }
 
-  _mkNumberRow(label, key, min, max, unit, defaultVal) {
+  // label: visible text. description: optional helper text. disabled: greys out row.
+  _mkNumberRow(label, key, min, max, unit, defaultVal, description = null, { disabled = false, disabledReason = null } = {}) {
     const row = document.createElement('div');
-    row.className = 'srow';
-    const lbl   = Object.assign(document.createElement('span'), { className: 'srow-label', textContent: label });
+    row.className = 'srow' + (disabled ? ' srow-disabled' : '');
+
+    const textWrap = document.createElement('div');
+    textWrap.className = 'srow-text';
+    textWrap.appendChild(Object.assign(document.createElement('span'), { className: 'srow-label', textContent: label }));
+    const desc = disabled ? disabledReason : description;
+    if (desc) {
+      textWrap.appendChild(Object.assign(document.createElement('span'), { className: 'srow-desc', textContent: desc }));
+    }
+    row.appendChild(textWrap);
+
     const field = document.createElement('ha-textfield');
-    field.type  = 'number';
-    field.setAttribute('min', min);
-    field.setAttribute('max', max);
-    field.setAttribute('suffix', unit);
+    field.type = 'number';
+    field.setAttribute('min',        min);
+    field.setAttribute('max',        max);
+    field.setAttribute('suffix',     unit);
     field.setAttribute('no-spinner', '');
     field.value = this._config[key] ?? defaultVal;
-    field.addEventListener('change', () => {
-      const v = Math.min(max, Math.max(min, parseInt(field.value) || defaultVal));
-      field.value = v;
-      this._config = { ...this._config, [key]: v };
-      this._fire(this._config);
-    });
-    row.appendChild(lbl);
+    if (disabled) {
+      field.setAttribute('disabled', '');
+    } else {
+      field.addEventListener('change', () => {
+        const raw = parseInt(field.value);
+        const v   = Math.min(max, Math.max(min, isNaN(raw) ? defaultVal : raw));
+        if (isNaN(raw) || raw < min || raw > max) {
+          field.setAttribute('error-message', `${min}–${max} ${unit}`);
+          field.setAttribute('invalid', '');
+          setTimeout(() => { field.removeAttribute('invalid'); field.removeAttribute('error-message'); }, 2000);
+        }
+        field.value = v;
+        this._fire({ ...this._config, [key]: v });
+      });
+    }
     row.appendChild(field);
     return row;
   }
 
-  _renderSettings() {
-    if (!this._generalRows) return;
-    const autoHide  = this._config.auto_hide ?? true;
-    const hasVolume = this._config.buttons.some(b => {
-      const key = typeof b === 'string' ? b : b?.button;
-      return key === 'volume_up' || key === 'volume_down';
+  _mkRadioGroup(label, key, options) {
+    const wrap = document.createElement('div');
+    wrap.className = 'radio-group';
+    wrap.appendChild(Object.assign(document.createElement('div'), { className: 'radio-label', textContent: label }));
+    const cur = this._config[key] ?? options[0].value;
+    options.forEach(({ value, label: optLabel }) => {
+      const ff    = document.createElement('ha-formfield');
+      ff.setAttribute('label', optLabel);
+      const radio = document.createElement('ha-radio');
+      radio.setAttribute('name',  key);
+      radio.setAttribute('value', value);
+      if (value === cur) radio.setAttribute('checked', '');
+      radio.addEventListener('change', () => {
+        if (!radio.checked) return;
+        wrap.querySelectorAll(`ha-radio[name="${key}"]`).forEach(r => {
+          if (r !== radio) r.removeAttribute('checked');
+        });
+        this._fire({ ...this._config, [key]: value });
+      });
+      ff.appendChild(radio);
+      wrap.appendChild(ff);
+    });
+    return wrap;
+  }
+
+  // ── Drag & drop ────────────────────────────────────────────────────────────
+
+  _remapExpanded(expandedObj, from, to) {
+    const next = {};
+    Object.entries(expandedObj).forEach(([k, v]) => {
+      const i = parseInt(k);
+      if      (i === from)                        next[to]    = v;
+      else if (from < to && i > from && i <= to)  next[i - 1] = v;
+      else if (from > to && i >= to  && i < from) next[i + 1] = v;
+      else                                        next[i]     = v;
+    });
+    return next;
+  }
+
+  _shiftExpanded(expandedObj, removedIdx) {
+    const next = {};
+    Object.entries(expandedObj).forEach(([k, v]) => {
+      const i = parseInt(k);
+      if      (i < removedIdx) next[i]     = v;
+      else if (i > removedIdx) next[i - 1] = v;
+    });
+    return next;
+  }
+
+  // Unified drag-and-drop for both mouse (HTML5 drag) and touch.
+  // Touch uses a fixed-position ghost clone that follows the finger.
+  // The drop indicator is a real DOM element inserted between entries.
+  _addDragDrop(list, getItems, expandedProp, onReorder) {
+    let dragIdx    = null;
+    let lastBefore = undefined;
+    let ghost      = null;
+    let ghostOffX  = 0;
+    let ghostOffY  = 0;
+
+    const indicator = Object.assign(document.createElement('div'), { className: 'drop-indicator' });
+    const ents      = () => [...list.querySelectorAll(':scope > .item-entry')];
+    const clearDrag = () => ents().forEach(e => e.classList.remove('dragging'));
+    const removeInd = () => { indicator.remove(); lastBefore = undefined; };
+
+    const showAt = (before) => {
+      if (lastBefore === before) return;
+      lastBefore = before;
+      before ? list.insertBefore(indicator, before) : list.appendChild(indicator);
+    };
+
+    // Finds the entry before which the indicator should appear, based on clientY.
+    const indicatorTarget = (clientY) => {
+      let before = null;
+      for (const ent of ents()) {
+        const r = ent.getBoundingClientRect();
+        if (clientY < r.top + r.height / 2) { before = ent; break; }
+      }
+      return before;
+    };
+
+    // Commits the drop using the current indicator position.
+    const commitDrop = () => {
+      if (dragIdx === null) return;
+      const children = [...list.children];
+      const indPos   = children.indexOf(indicator);
+      if (indPos === -1) { dragIdx = null; return; }
+      let to = ents().filter(en => children.indexOf(en) < indPos).length;
+      removeInd(); clearDrag();
+      if (dragIdx < to) to--;
+      if (to !== dragIdx) {
+        const items = [...getItems()];
+        const [moved] = items.splice(dragIdx, 1);
+        items.splice(to, 0, moved);
+        this[expandedProp] = this._remapExpanded(this[expandedProp], dragIdx, to);
+        const from = dragIdx;
+        dragIdx = null;
+        onReorder(items);
+        return;
+      }
+      dragIdx = null;
+    };
+
+    // ── Mouse (HTML5 drag) ──────────────────────────────────────────────────
+
+    ents().forEach((entry, idx) => {
+      entry.setAttribute('draggable', 'true');
+      entry.addEventListener('dragstart', (e) => {
+        dragIdx = idx;
+        e.dataTransfer.effectAllowed = 'move';
+        requestAnimationFrame(() => entry.classList.add('dragging'));
+      });
+      entry.addEventListener('dragend', () => { dragIdx = null; removeInd(); clearDrag(); });
+
+      // Keyboard reordering via ArrowUp / ArrowDown on the drag handle
+      const handle = entry.querySelector('.drag-handle');
+      if (handle) {
+        handle.setAttribute('tabindex', '0');
+        handle.setAttribute('role', 'button');
+        handle.setAttribute('aria-label', 'Drag to reorder');
+        handle.addEventListener('keydown', (e) => {
+          if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+          e.preventDefault();
+          const allEnts = ents();
+          const to = e.key === 'ArrowUp' ? idx - 1 : idx + 1;
+          if (to < 0 || to >= allEnts.length) return;
+          const items = [...getItems()];
+          [items[idx], items[to]] = [items[to], items[idx]];
+          this[expandedProp] = this._remapExpanded(this[expandedProp], idx, to);
+          onReorder(items);
+          // Re-focus the handle at its new position after re-render
+          requestAnimationFrame(() => {
+            const newEnts = list.querySelectorAll(':scope > .item-entry');
+            newEnts[to]?.querySelector('.drag-handle')?.focus();
+          });
+        });
+      }
     });
 
-    this._generalRows.innerHTML = '';
-    this._generalRows.appendChild(this._mkSelectRow('Aspect ratio', 'aspect_ratio', [
-      { value: 'auto',   label: 'Auto (follow cover art)' },
-      { value: 'square', label: 'Square' },
-    ]));
-    if (hasVolume) {
-      this._generalRows.appendChild(this._mkNumberRow('Volume step', 'volume_step', 1, 50, '%', 2));
+    list.addEventListener('dragover', (e) => {
+      if (dragIdx === null) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      showAt(indicatorTarget(e.clientY));
+    });
+
+    list.addEventListener('drop', (e) => {
+      e.preventDefault();
+      commitDrop();
+    });
+
+    // ── Touch ───────────────────────────────────────────────────────────────
+
+    // Only attach touch listeners to the drag handle so normal scrolling is
+    // unaffected when the user touches anywhere else on the entry.
+    ents().forEach((entry, idx) => {
+      const handle = entry.querySelector('.drag-handle');
+      if (!handle) return;
+
+      handle.addEventListener('touchstart', (e) => {
+        // Don't steal scroll — only activate on the handle itself
+        const touch = e.touches[0];
+        dragIdx = idx;
+        entry.classList.add('dragging');
+
+        // Build a ghost clone that follows the finger
+        const rect = entry.getBoundingClientRect();
+        ghostOffX  = touch.clientX - rect.left;
+        ghostOffY  = touch.clientY - rect.top;
+
+        ghost = entry.cloneNode(true);
+        ghost.className = 'drag-ghost';
+        ghost.style.width  = rect.width + 'px';
+        ghost.style.left   = (touch.clientX - ghostOffX) + 'px';
+        ghost.style.top    = (touch.clientY - ghostOffY) + 'px';
+        // Render ghost in the host document, not inside the shadow root,
+        // so it can overlay everything.
+        document.body.appendChild(ghost);
+
+        showAt(indicatorTarget(touch.clientY));
+        e.preventDefault();
+      }, { passive: false });
+
+      handle.addEventListener('touchmove', (e) => {
+        if (dragIdx === null) return;
+        const touch = e.touches[0];
+        if (ghost) {
+          ghost.style.left = (touch.clientX - ghostOffX) + 'px';
+          ghost.style.top  = (touch.clientY - ghostOffY) + 'px';
+        }
+        showAt(indicatorTarget(touch.clientY));
+        e.preventDefault();
+      }, { passive: false });
+
+      handle.addEventListener('touchend', () => {
+        if (ghost) { ghost.remove(); ghost = null; }
+        commitDrop();
+      });
+
+      handle.addEventListener('touchcancel', () => {
+        if (ghost) { ghost.remove(); ghost = null; }
+        dragIdx = null; removeInd(); clearDrag();
+      });
+    });
+  }
+
+  // ── Players tab ────────────────────────────────────────────────────────────
+
+  _renderPlayers() {
+    const root    = this._content;
+    const players = this._config.players;
+    const save    = (updated) => this._fireAndRender({ ...this._config, players: updated });
+
+    if (!players.length) {
+      root.appendChild(Object.assign(document.createElement('p'), {
+        className:   'empty-state',
+        textContent: 'No players configured. Add one below to get started.',
+      }));
     }
 
-    this._overlayRows.innerHTML = '';
-    this._overlayRows.appendChild(this._mkToggleRow('Auto-hide', 'auto_hide'));
-    if (autoHide) {
-      this._overlayRows.appendChild(this._mkNumberRow('Show duration', 'show_duration', 1, 60, 's', 10));
-    }
-    this._overlayRows.appendChild(this._mkToggleRow('Show on change', 'show_on_change'));
+    const list = document.createElement('div');
+    list.className = 'item-list';
+
+    players.forEach((player, idx) => {
+      const isOpen = !!this._playerExpanded[idx];
+      const entry  = document.createElement('div');
+      entry.className = 'item-entry' + (isOpen ? ' open-entry' : '');
+
+      const row = document.createElement('div');
+      row.className = 'item-row';
+
+      const icon = document.createElement('ha-icon');
+      icon.className = 'row-icon';
+      icon.setAttribute('icon',
+        this._hass?.states[player.entity]?.attributes?.icon ||
+        this._hass?.entities?.[player.entity]?.icon || 'mdi:speaker'
+      );
+
+      const labelWrap = document.createElement('div');
+      labelWrap.className = 'row-label-wrap';
+      labelWrap.appendChild(Object.assign(document.createElement('div'), {
+        className: 'row-label', textContent: player.name || _entityName(player.entity, this._hass),
+      }));
+      labelWrap.appendChild(Object.assign(document.createElement('div'), {
+        className: 'row-sub', textContent: player.entity,
+      }));
+
+      const { wrap: expandWrap, btn: expandBtn, ico: expandIco } = this._mkExpandBtn(isOpen);
+      const deleteWrap = this._mkDeleteBtn(() => {
+        this._playerExpanded = this._shiftExpanded(this._playerExpanded, idx);
+        save(players.filter((_, j) => j !== idx));
+      });
+
+      row.append(this._mkDragHandle(), icon, labelWrap, expandWrap, deleteWrap);
+      entry.appendChild(row);
+
+      const body = document.createElement('div');
+      body.className     = 'item-body';
+      body.style.display = isOpen ? '' : 'none';
+
+      expandBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._playerExpanded[idx] = !this._playerExpanded[idx];
+        const open = this._playerExpanded[idx];
+        expandIco.setAttribute('icon', open ? 'mdi:chevron-up' : 'mdi:chevron-down');
+        entry.classList.toggle('open-entry', open);
+        body.style.display = open ? '' : 'none';
+      });
+
+      const mkLabel = (t) => Object.assign(document.createElement('div'), { className: 'body-label', textContent: t });
+
+      // Entity — exclude other already-configured players
+      const otherEntities = players.filter((_, j) => j !== idx).map(p => p.entity);
+      const entityForm = document.createElement('ha-form');
+      entityForm.schema = [{ name: 'entity', selector: { entity: {
+        domain: 'media_player', exclude_entities: otherEntities,
+      } } }];
+      entityForm.data   = { entity: player.entity };
+      entityForm.computeLabel = () => '';
+      entityForm.addEventListener('value-changed', (e) => {
+        const entity = e.detail.value.entity;
+        if (!entity) return;
+        const arr = [...players]; arr[idx] = { ...arr[idx], entity }; save(arr);
+      });
+
+      // Display name — _fire only (no re-render) to preserve focus; update row label live
+      const nameForm = document.createElement('ha-form');
+      nameForm.schema = [{ name: 'name', selector: { text: {} } }];
+      nameForm.data   = { name: player.name || '' };
+      nameForm.computeLabel = () => '';
+      nameForm.addEventListener('value-changed', (e) => {
+        const arr = [...players];
+        arr[idx]  = { ...arr[idx] };
+        const val = e.detail.value.name?.trim() || '';
+        if (val) arr[idx].name = val; else delete arr[idx].name;
+        const rowLabel = labelWrap.querySelector('.row-label');
+        if (rowLabel) rowLabel.textContent = val || _entityName(player.entity, this._hass);
+        this._fire({ ...this._config, players: arr });
+      });
+
+      // Group members — filter to players from the same integration, exclude own entity.
+      // Falls back to all media_players if platform info is unavailable.
+      const ownPlatform = this._hass?.entities?.[player.entity]?.platform;
+      const alreadyConfigured = new Set(player.group_members || []);
+      const groupCandidates = Object.keys(this._hass?.states ?? {}).filter(id => {
+        if (!id.startsWith('media_player.') || id === player.entity) return false;
+        if (alreadyConfigured.has(id)) return true;  // always include current selections
+        if (!ownPlatform) return true;
+        return this._hass?.entities?.[id]?.platform === ownPlatform;
+      });
+      const excludeFromGroup = Object.keys(this._hass?.states ?? {})
+        .filter(id => id.startsWith('media_player.') && !groupCandidates.includes(id));
+      const groupForm = document.createElement('ha-form');
+      groupForm.schema = [{ name: 'group_members', selector: { entity: {
+        multiple: true,
+        domain: 'media_player',
+        exclude_entities: excludeFromGroup,
+      } } }];
+      groupForm.data   = { group_members: player.group_members || [] };
+      groupForm.computeLabel = () => '';
+      groupForm.addEventListener('value-changed', (e) => {
+        const arr = [...players];
+        arr[idx]  = { ...arr[idx] };
+        const val = e.detail.value.group_members || [];
+        if (val.length) arr[idx].group_members = val; else delete arr[idx].group_members;
+        save(arr);
+      });
+
+      const groupMembersLabel = document.createElement('div');
+      groupMembersLabel.className = 'body-label';
+      groupMembersLabel.textContent = 'Group members';
+      const groupMembersSub = Object.assign(document.createElement('div'), {
+        className: 'body-label-sub',
+        textContent: 'Works best between speakers of the same brand',
+      });
+
+      body.append(
+        mkLabel('Entity'),       entityForm,
+        mkLabel('Display name'), nameForm,
+        groupMembersLabel, groupMembersSub, groupForm,
+      );
+
+      entry.appendChild(body);
+      list.appendChild(entry);
+    });
+
+    root.appendChild(list);
+    this._addDragDrop(list, () => this._config.players, '_playerExpanded',
+      (reordered) => save(reordered));
+
+    // ── Add player ──
+    const addSection = document.createElement('div');
+    addSection.className = 'add-section';
+    addSection.appendChild(Object.assign(document.createElement('div'), {
+      className: 'add-label', textContent: 'Add player',
+    }));
+    const addForm = document.createElement('ha-form');
+    addForm.schema = [{ name: 'entity', selector: { entity: {
+      domain: 'media_player',
+      exclude_entities: players.map(p => p.entity),
+    } } }];
+    addForm.data   = { entity: null };
+    addForm.computeLabel = () => '';
+    if (this._hass) addForm.hass = this._hass;
+    addForm.addEventListener('value-changed', (e) => {
+      const entity = e.detail.value.entity;
+      if (!entity) return;
+      addForm.data = { entity: null };
+      save([...players, { entity }]);
+    });
+    addSection.appendChild(addForm);
+    root.appendChild(addSection);
   }
 
-  _pushFormData() {
-    const entities = this._config.players.map(p => p.entity).filter(Boolean);
-    if (this._playersForm) this._playersForm.data = { players: entities };
-    this._renderSettings();
-    this._updateEmptyState();
-  }
+  // ── Buttons tab ────────────────────────────────────────────────────────────
 
-  _updateEmptyState() {
-    if (!this._emptyState) return;
-    const hasPlayers = this._config.players.length > 0;
-    this._emptyState.classList.toggle('hidden', hasPlayers);
-    if (this._configSection) this._configSection.style.display = hasPlayers ? '' : 'none';
-  }
-
-  // ── Button list ─────────────────────────────────────────────────────────────
-
-  _renderButtonList() {
-    const list     = this._btnList;
-    const buttons  = this._config.buttons;
-    const expanded = this._expanded;
-    const save = (newButtons) => { this._fire({ ...this._config, buttons: newButtons }); };
-    const mkArrowBtn = (ico, disabled, onClick) => {
-      const b = document.createElement('ha-icon-button');
-      const i = document.createElement('ha-icon');
-      i.setAttribute('icon', ico);
-      b.appendChild(i);
-      if (disabled) b.setAttribute('disabled', '');
-      b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
-      return b;
-    };
-
-    if (!list) return;
-    list.innerHTML = '';
-
-    const swapExpanded = (a, b) => {
-      const tmp = expanded[a];
-      expanded[a] = expanded[b];
-      expanded[b] = tmp;
-    };
+  _renderButtons() {
+    const root      = this._content;
+    const buttons   = this._config.buttons;
+    const save      = (updated) => this._fireAndRender({ ...this._config, buttons: updated });
+    const saveField = (updated) => this._fire({ ...this._config, buttons: updated });
+    const list = document.createElement('div');    list.className = 'item-list';
 
     buttons.forEach((item, arrIdx) => {
-      // ── Disabled builtin ───────────────────────────────────
+      const entry = document.createElement('div');
+      entry.className = 'item-entry';
+
+      // ── Disabled builtin ──
       if (item?._disabled) {
         const key  = item._disabled;
         const info = ALL_BUTTONS_INFO.find(b => b.key === key);
         if (!info) return;
         if (key === 'group' && !this._config.players.some(p => p.group_members?.length)) return;
+
+        entry.classList.add('disabled-entry');
+
         const row = document.createElement('div');
-        row.className = 'btn-row';
+        row.className = 'item-row';
+
         const icon = document.createElement('ha-icon');
-        icon.className = 'btn-row-icon';
+        icon.className = 'row-icon';
         icon.setAttribute('icon', info.icon);
-        const label = document.createElement('span');
-        label.className = 'btn-row-label';
-        label.textContent = info.label;
-        const spacer = document.createElement('div');
-        spacer.className = 'btn-arrows';
+
+        const label = Object.assign(document.createElement('span'), {
+          className: 'row-label', textContent: info.label,
+        });
+
         const toggleWrap = document.createElement('div');
         toggleWrap.className = 'row-action';
         const toggle = document.createElement('ha-switch');
         toggle.checked = false;
         toggle.addEventListener('change', () => {
-          const arr = [...buttons];
-          arr[arrIdx] = key;
-          save(arr);
+          const arr = [...buttons]; arr[arrIdx] = key; save(arr);
         });
         toggleWrap.appendChild(toggle);
-        row.appendChild(icon); row.appendChild(label);
-        row.appendChild(spacer); row.appendChild(toggleWrap);
-        list.appendChild(row);
+
+        row.append(this._mkDragHandle(), icon, label, toggleWrap);
+        entry.appendChild(row);
+        list.appendChild(entry);
         return;
       }
 
+      // ── Enabled builtin or custom ──
       const isBuiltin = typeof item === 'string';
       const info      = isBuiltin ? ALL_BUTTONS_INFO.find(b => b.key === item) : null;
       if (isBuiltin && item === 'group' && !this._config.players.some(p => p.group_members?.length)) return;
 
       const row = document.createElement('div');
-      row.className = 'btn-row enabled';
+      row.className = 'item-row';
 
       const icon = document.createElement('ha-icon');
-      icon.className = 'btn-row-icon';
+      icon.className = 'row-icon';
       icon.setAttribute('icon', isBuiltin ? info.icon : (item.icon || 'mdi:gesture-tap-button'));
 
-      const label = document.createElement('span');
-      label.className = 'btn-row-label';
-      label.textContent = isBuiltin ? info.label
-        : (item.label || item.tap_action?.perform_action || 'Custom button');
+      const label = Object.assign(document.createElement('span'), {
+        className:   'row-label',
+        textContent: isBuiltin ? info.label : (item.label || item.tap_action?.perform_action || 'Custom button'),
+      });
 
-      const prevRealIdx = buttons.slice(0, arrIdx).reduce((p, b, i) => b?._disabled ? p : i, -1);
-      const nextRealIdx  = buttons.findIndex((b, i) => i > arrIdx && !b?._disabled);
-      const arrows = document.createElement('div');
-      arrows.className = 'btn-arrows';
-      arrows.appendChild(mkArrowBtn('mdi:arrow-up', prevRealIdx === -1, () => {
-        const arr = [...buttons];
-        [arr[prevRealIdx], arr[arrIdx]] = [arr[arrIdx], arr[prevRealIdx]];
-        swapExpanded(arrIdx, prevRealIdx);
-        save(arr);
-      }));
-      arrows.appendChild(mkArrowBtn('mdi:arrow-down', nextRealIdx === -1, () => {
-        const arr = [...buttons];
-        [arr[arrIdx], arr[nextRealIdx]] = [arr[nextRealIdx], arr[arrIdx]];
-        swapExpanded(arrIdx, nextRealIdx);
-        save(arr);
-      }));
-
-      row.appendChild(icon);
-      row.appendChild(label);
-      row.appendChild(arrows);
+      row.append(this._mkDragHandle(), icon, label);
 
       if (isBuiltin) {
         const toggleWrap = document.createElement('div');
@@ -1598,102 +2203,187 @@ class CoverMediaCardEditor extends HTMLElement {
         const toggle = document.createElement('ha-switch');
         toggle.checked = true;
         toggle.addEventListener('change', () => {
-          const arr = [...buttons];
-          arr[arrIdx] = { _disabled: item };
-          save(arr);
+          const arr = [...buttons]; arr[arrIdx] = { _disabled: item }; save(arr);
         });
         toggleWrap.appendChild(toggle);
         row.appendChild(toggleWrap);
-        list.appendChild(row);
-      } else {
-        const isOpen = !!expanded[arrIdx];
+        entry.appendChild(row);
 
-        const expandWrap = document.createElement('div');
-        expandWrap.className = 'row-action';
-        const expandBtn = document.createElement('ha-icon-button');
-        expandBtn.className = 'expand-btn';
-        const expandIco = document.createElement('ha-icon');
-        expandIco.setAttribute('icon', isOpen ? 'mdi:chevron-up' : 'mdi:chevron-down');
-        expandBtn.appendChild(expandIco);
-        expandBtn.title = isOpen ? 'Collapse' : 'Edit';
-        expandWrap.appendChild(expandBtn);
+      } else {
+        // Custom button: expand + delete
+        const isOpen = !!this._btnExpanded[arrIdx];
+        if (isOpen) entry.classList.add('open-entry');
+        const { wrap: expandWrap, btn: expandBtn, ico: expandIco } = this._mkExpandBtn(isOpen);
+        const deleteWrap = this._mkDeleteBtn(() => {
+          this._btnExpanded = this._shiftExpanded(this._btnExpanded, arrIdx);
+          save(buttons.filter((_, j) => j !== arrIdx));
+        });
+        row.append(expandWrap, deleteWrap);
 
         const body = document.createElement('div');
-        body.className = 'cb-body' + (isOpen ? ' open' : '');
-        const bodyInner = document.createElement('div');
-        bodyInner.className = 'cb-body-inner';
+        body.className     = 'item-body';
+        body.style.display = isOpen ? '' : 'none';
 
         expandBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          expanded[arrIdx] = !expanded[arrIdx];
-          const open = expanded[arrIdx];
+          this._btnExpanded[arrIdx] = !this._btnExpanded[arrIdx];
+          const open = this._btnExpanded[arrIdx];
           expandIco.setAttribute('icon', open ? 'mdi:chevron-up' : 'mdi:chevron-down');
-          expandBtn.title = open ? 'Collapse' : 'Edit';
-          body.classList.toggle('open', open);
+          entry.classList.toggle('open-entry', open);
+          body.style.display = open ? '' : 'none';
         });
 
-        row.appendChild(expandWrap);
+        const mkLabel = (t) => Object.assign(document.createElement('div'), { className: 'body-label', textContent: t });
 
-        const form = document.createElement('ha-form');
-        form.className = 'btn-form';
-        form.schema    = [
-          { name: 'icon',  selector: { icon: {} } },
+        const appearanceForm = document.createElement('ha-form');
+        appearanceForm.className = 'btn-form';
+        appearanceForm.schema    = [
+          { name: 'icon',  selector: { icon: {} }  },
           { name: 'label', selector: { text: {} } },
         ];
-        form.data = item;
-        form.computeLabel = (s) => ({ icon: 'Icon', label: 'Label (tooltip)' }[s.name] || s.name);
-        if (this._hass) form.hass = this._hass;
-        form.addEventListener('value-changed', (e) => {
-          const arr = [...buttons];
-          arr[arrIdx] = { ...arr[arrIdx], ...e.detail.value };
+        appearanceForm.data         = item;
+        appearanceForm.computeLabel = (s) => ({ icon: 'Icon', label: 'Label (tooltip)' }[s.name] ?? s.name);
+        appearanceForm.addEventListener('value-changed', (e) => {
+          const arr = [...buttons]; arr[arrIdx] = { ...arr[arrIdx], ...e.detail.value };
           icon.setAttribute('icon', arr[arrIdx].icon || 'mdi:gesture-tap-button');
           label.textContent = arr[arrIdx].label || arr[arrIdx].tap_action?.perform_action || 'Custom button';
-          save(arr);
+          saveField(arr);
         });
 
         const actionForm = document.createElement('ha-form');
-        actionForm.className = 'btn-form';
-        actionForm.schema = [{ name: 'tap_action', selector: { ui_action: {} } }];
-        actionForm.data = item;
-        actionForm.computeLabel = () => 'Action';
-        if (this._hass) actionForm.hass = this._hass;
+        actionForm.className    = 'btn-form';
+        actionForm.schema       = [{ name: 'tap_action', selector: { ui_action: {} } }];
+        actionForm.data         = item;
+        actionForm.computeLabel = () => '';
         actionForm.addEventListener('value-changed', (e) => {
-          const arr = [...buttons];
-          arr[arrIdx] = { ...arr[arrIdx], ...e.detail.value };
+          const arr = [...buttons]; arr[arrIdx] = { ...arr[arrIdx], ...e.detail.value };
           label.textContent = arr[arrIdx].label || arr[arrIdx].tap_action?.perform_action || 'Custom button';
-          save(arr);
+          saveField(arr);
         });
 
-        const subLabelAppearance = Object.assign(document.createElement('div'),
-          { className: 'cb-sub-label', textContent: 'Button' });
-        const divider = document.createElement('hr');
-        divider.className = 'cb-divider';
-        const subLabelAction = Object.assign(document.createElement('div'),
-          { className: 'cb-sub-label', textContent: 'Action' });
+        body.append(
+          mkLabel('Button'), appearanceForm,
+          mkLabel('Action'), actionForm,
+        );
 
-        bodyInner.appendChild(subLabelAppearance);
-        bodyInner.appendChild(form);
-        bodyInner.appendChild(divider);
-        bodyInner.appendChild(subLabelAction);
-        bodyInner.appendChild(actionForm);
+        // Hint when no action has been configured yet
+        if (!item.tap_action?.action || item.tap_action.action === 'none') {
+          const hint = document.createElement('div');
+          hint.className = 'btn-hint';
+          const hIco = document.createElement('ha-icon');
+          hIco.setAttribute('icon', 'mdi:information-outline');
+          hint.append(hIco, Object.assign(document.createElement('span'), {
+            textContent: 'Choose an action above to make this button do something.',
+          }));
+          body.appendChild(hint);
+        }
 
-        body.appendChild(bodyInner);
-
-        const delBtn = document.createElement('button');
-        delBtn.className = 'cb-delete';
-        delBtn.textContent = 'Remove custom button';
-        delBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          delete expanded[arrIdx];
-          save(buttons.filter((_, j) => j !== arrIdx));
-        });
-        body.appendChild(delBtn);
-        list.appendChild(row);
-        list.appendChild(body);
+        entry.appendChild(row);
+        entry.appendChild(body);
       }
+
+      list.appendChild(entry);
     });
+
+    root.appendChild(list);
+    this._addDragDrop(list, () => this._config.buttons, '_btnExpanded',
+      (reordered) => save(reordered));
+
+    // ── Add custom button ──
+    const addSection = document.createElement('div');
+    addSection.className = 'add-section';
+    const addBtn = document.createElement('ha-button');
+    addBtn.textContent = 'Add custom button';
+    addBtn.addEventListener('click', () => {
+      const updated = [...buttons, { icon: 'mdi:information-outline', label: 'More info', tap_action: { action: 'more-info' } }];
+      this._btnExpanded[updated.length - 1] = true;
+      save(updated);
+    });
+    addSection.appendChild(addBtn);
+    root.appendChild(addSection);
   }
 
+  // ── Settings tab ───────────────────────────────────────────────────────────
+
+  _renderSettings() {
+    const root     = this._content;
+    const autoHide = this._config.auto_hide ?? true;
+    const autoSw   = (this._config.auto_switch ?? 0) > 0;
+    const multi    = this._config.players.length > 1;
+    const hasVol   = this._config.buttons.some(b => {
+      const k = typeof b === 'string' ? b : null;
+      return k === 'volume_up' || k === 'volume_down';
+    });
+
+    // ── General ──
+    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: 'General' }));
+    const generalGroup = document.createElement('div');
+    generalGroup.className = 'settings-group';
+    generalGroup.appendChild(this._mkRadioGroup('Aspect ratio', 'aspect_ratio', [
+      { value: 'auto',   label: 'Auto — square, taller if the cover art is' },
+      { value: 'square', label: 'Square — always 1:1' },
+    ]));
+    generalGroup.appendChild(this._mkNumberRow(
+      'Volume step', 'volume_step', 1, 50, '%', 2,
+      'How much the volume changes per button press',
+      { disabled: !hasVol, disabledReason: 'Add a volume up or down button to use this' }
+    ));
+    root.appendChild(generalGroup);
+
+    // ── Overlay ──
+    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: 'Overlay' }));
+    const overlayGroup = document.createElement('div');
+    overlayGroup.className = 'settings-group';
+    overlayGroup.appendChild(this._mkToggleRow('Auto-hide', 'auto_hide', {
+      rerender:    true,
+      description: 'Hide the controls after a few seconds during playback',
+    }));
+    overlayGroup.appendChild(this._mkNumberRow(
+      'Show duration', 'show_duration', 1, 60, 's', 10,
+      'How long the controls stay visible before hiding',
+      { disabled: !autoHide, disabledReason: 'Only applies when auto-hide is on' }
+    ));
+    overlayGroup.appendChild(this._mkToggleRow('Show on change', 'show_on_change', {
+      description:    'Briefly re-show the controls when the media changes',
+      disabled:       !autoHide,
+      disabledReason: 'Only applies when auto-hide is on',
+    }));
+    root.appendChild(overlayGroup);
+
+    // ── Player switching ──
+    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: 'Player switching' }));
+    const switchGroup = document.createElement('div');
+    switchGroup.className = 'settings-group';
+
+    const autoSwRow = document.createElement('div');
+    autoSwRow.className = 'srow' + (!multi ? ' srow-disabled' : '');
+    const autoSwText = document.createElement('div');
+    autoSwText.className = 'srow-text';
+    autoSwText.appendChild(Object.assign(document.createElement('span'), { className: 'srow-label', textContent: 'Auto switch' }));
+    autoSwText.appendChild(Object.assign(document.createElement('span'), { className: 'srow-desc', textContent:
+      multi ? 'Switches to another player when it starts playing and this one is idle'
+            : 'Add more than one player to use this',
+    }));
+    autoSwRow.appendChild(autoSwText);
+    const autoSwToggle = document.createElement('ha-switch');
+    autoSwToggle.checked = autoSw;
+    if (!multi) {
+      autoSwToggle.setAttribute('disabled', '');
+    } else {
+      autoSwToggle.addEventListener('change', () => {
+        this._fireAndRender({ ...this._config, auto_switch: autoSwToggle.checked ? 30 : 0 });
+      });
+    }
+    autoSwRow.appendChild(autoSwToggle);
+    switchGroup.appendChild(autoSwRow);
+
+    switchGroup.appendChild(this._mkNumberRow(
+      'Delay', 'auto_switch', 1, 300, 's', 30,
+      'Wait this long before switching, in case the current player resumes',
+      { disabled: !multi || !autoSw, disabledReason: !multi ? 'Add more than one player to use this' : 'Enable auto switch to use this' }
+    ));
+    root.appendChild(switchGroup);
+  }
 }
 
 if (!customElements.get('cover-media-card-editor')) {
