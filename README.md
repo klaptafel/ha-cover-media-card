@@ -17,7 +17,7 @@ A Home Assistant Lovelace card that turns your media players into a full-bleed c
 - **Cover art background** — artwork fills the entire card. Aspect ratio follows the image automatically, or lock it to square.
 - **Auto-hiding overlay** — track title, artist, and controls fade out after a configurable timeout. Tap to show them, or they reappear automatically on track change.
 - **Multi-player tabs** — configure multiple media players and switch between them with a tap.
-- **Visual editor** — players, buttons, and overlay behavior are all configurable without YAML.
+- **Visual editor** — players, buttons, and settings are all configurable without YAML. Buttons and players can be reordered by drag-and-drop.
 
 With YAML you can also configure:
 
@@ -60,6 +60,7 @@ players:
 | `show_duration` | `10` | Seconds before the overlay hides. |
 | `show_on_change` | `true` | Show the overlay when the track changes. |
 | `volume_step` | `2` | Volume step in percent. |
+| `auto_switch` | `0` | Seconds to wait before switching to a player that starts playing. `0` disables auto-switch. |
 
 ### Built-in buttons
 
