@@ -113,6 +113,11 @@ const _entityName = (entity, hass) =>
   hass?.states[entity]?.attributes?.friendly_name
   || entity.split('.')[1]?.replace(/_/g, ' ') || entity;
 const _cacheParam = (url) => url?.match(/[?&]cache=([^&]*)/)?.[1] ?? url?.split('?')[0] ?? '';
+const _appLogoUrl = (appName) => {
+  if (!appName) return null;
+  const slug = appName.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return `https://raw.githubusercontent.com/klaptafel/ha-cover-media-card/main/apps/${slug}.png`;
+};
 
 const BUTTON_DEFS = {
   previous: {
@@ -404,11 +409,13 @@ class CoverMediaCard extends HTMLElement {
 
   _showCtrl() {
     this._ctrlVis = true;
+    this._el?.overlayBg?.classList.add('visible');
     this._el?.overlay?.classList.add('visible');
     if (this._config.auto_hide !== false) this._scheduleHide();
   }
   _hideCtrl() {
     this._ctrlVis = false;
+    this._el?.overlayBg?.classList.remove('visible');
     this._el?.overlay?.classList.remove('visible');
     clearTimeout(this._hideTimer);
     this._hideTimer = null;
@@ -509,7 +516,7 @@ class CoverMediaCard extends HTMLElement {
     this._playerVisibleCache.clear();
     this._pending         = {};
     this._lastIconIdx     = -1;
-    this._lastArtBase     = '';
+    this._lastArtBase     = null;  // null forces clear on first _updateCard after switch
     this._lastHasArt      = null;
     this._lastAspectPct   = null;
     this._lastTrackKey    = null;
@@ -675,6 +682,7 @@ class CoverMediaCard extends HTMLElement {
     this._statusPriority = priority;
     // Show overlay without restarting auto-hide timer — that restarts after flash ends
     this._ctrlVis = true;
+    this._el?.overlayBg?.classList.add('visible');
     this._el?.overlay?.classList.add('visible');
     if (this._el?.trackTitle) this._el.trackTitle.textContent = title;
     if (this._el?.trackArtist) {
@@ -916,16 +924,25 @@ class CoverMediaCard extends HTMLElement {
         }
 
         /* ── Overlay ───────────────────────────────────── */
-        .overlay {
+        .overlay-background {
+          position: absolute; inset: 0;
           z-index: 10;
-          display: flex; flex-direction: column;
-          align-items: center; justify-content: space-between;
-          padding: var(--overlay-padding-y) var(--overlay-padding-x);
           background: transparent; opacity: 0;
           transition: opacity .3s ease, background .3s ease;
           pointer-events: none;
         }
-        .overlay.visible { opacity: 1; background: var(--overlay-bg); pointer-events: all; }
+        .overlay-background.visible { opacity: 1; background: var(--overlay-bg); }
+
+        .overlay-content {
+          position: absolute; inset: 0;
+          z-index: 11;
+          display: flex; flex-direction: column;
+          align-items: center; justify-content: space-between;
+          padding: var(--overlay-padding-y) var(--overlay-padding-x);
+          opacity: 0; transition: opacity .3s ease;
+          pointer-events: none;
+        }
+        .overlay-content.visible { opacity: 1; pointer-events: all; }
 
         .top-bar { width: 100%; display: flex; justify-content: center; }
         .player-pills { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; width: 100%; }
@@ -936,21 +953,19 @@ class CoverMediaCard extends HTMLElement {
           font-family: inherit; font-size: 13px; font-weight: 500;
           cursor: pointer; white-space: nowrap;
           transition: background .2s, color .2s;
-          box-shadow: 0 1px 4px rgba(0,0,0,.25);
           max-width: calc(100% - var(--overlay-padding-x) * 2);
           flex: 0 0 auto;
         }
         .player-pill span { overflow: hidden; text-overflow: ellipsis; }
         .player-pill:hover  { background: rgba(255,255,255,0.22); color: #fff; }
-        .player-pill.active { background: var(--pill-active-bg); color: var(--pill-active-color); }
+        .player-pill.active { background: var(--pill-active-bg); color: var(--pill-active-color); box-shadow: 0 2px 8px rgba(0,0,0,.3); }
         .pill-cluster {
           display: flex; align-items: center; flex: 0 0 auto;
           border-radius: 999px;
-          box-shadow: 0 1px 4px rgba(0,0,0,.25);
           max-width: calc(100% - var(--overlay-padding-x) * 2);
           overflow: hidden;
         }
-        .pill-cluster .player-pill { box-shadow: none; max-width: none; flex: 1 1 auto; min-width: 0; }
+        .pill-cluster .player-pill { max-width: none; flex: 1 1 auto; min-width: 0; }
         .player-pill.unavailable { opacity: 0.45; }
         .player-pill.unavailable:hover { background: rgba(255,255,255,0.22); color: #fff; }
         .player-pill ha-icon { --mdc-icon-size: 16px; flex-shrink: 0; }
@@ -996,7 +1011,7 @@ class CoverMediaCard extends HTMLElement {
         .ctrl-btn:active { transform: scale(.92); }
         .ctrl-btn.play   { background: #fff; color: #111; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
         .ctrl-btn.play:hover { background: rgba(255,255,255,.9); }
-        .ctrl-btn.active-toggle { background: #fff; color: #111; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+        .ctrl-btn.active-toggle { background: #fff; color: #111; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
         .ctrl-btn.active-toggle:hover { background: rgba(255,255,255,.9); }
         .ctrl-btn ha-icon { pointer-events: none; --mdc-icon-size: 20px; display: flex; }
       </style>
@@ -1010,7 +1025,9 @@ class CoverMediaCard extends HTMLElement {
               <ha-icon id="artPlaceholderIcon" icon="${this._playerIcon(this._playerIdx)}"></ha-icon>
             </div>
 
-            <div class="overlay" id="overlay">
+            <div class="overlay-background" id="overlayBg"></div>
+
+            <div class="overlay-content" id="overlay">
               <div class="top-bar">
                 ${multi ? `<div class="player-pills" id="playerPills"></div>` : ''}
               </div>
@@ -1098,7 +1115,8 @@ class CoverMediaCard extends HTMLElement {
     this._el = {
       artImg,
       cardAspect,
-      overlay:          this.shadowRoot.querySelector('.overlay'),
+      overlayBg:        this.shadowRoot.querySelector('#overlayBg'),
+      overlay:          this.shadowRoot.querySelector('.overlay-content'),
       trackTitle:       this.shadowRoot.querySelector('#trackTitle'),
       trackArtist:      this.shadowRoot.querySelector('#trackArtist'),
       centerArea:       this.shadowRoot.querySelector('.center-area'),
@@ -1194,6 +1212,7 @@ class CoverMediaCard extends HTMLElement {
         this._el.trackArtist.style.display = sub ? '' : 'none';
       }
       // Show overlay without starting auto-hide
+      this._el?.overlayBg?.classList.add('visible');
       this._el?.overlay?.classList.add('visible');
     }
 
@@ -1209,11 +1228,12 @@ class CoverMediaCard extends HTMLElement {
     const st       = this._state?.state;
     const isActive = st === 'playing';
     // Ignore stale entity_picture when unavailable — HA keeps old value after disconnect
-    const artUrl   = (st === 'unavailable' || st === 'unknown' || !st) ? null : this._attr('entity_picture');
+    const artUrl   = (st === 'unavailable' || st === 'unknown' || !st) ? null :
+      this._attr('entity_picture') || _appLogoUrl(this._attr('app_name'));
     const title    = this._attr('media_title') || '';
 
     // ── Art ───────────────────────────────────────────────
-    const { artImg, cardAspect, overlay, mainControls, artPlaceholder, artPlaceholderIcon } = this._el;
+    const { artImg, cardAspect, overlayBg, overlay, mainControls, artPlaceholder, artPlaceholderIcon } = this._el;
     const artBase = _cacheParam(artUrl);
     if (artUrl) {
       if (artBase !== this._lastArtBase) {
@@ -1307,8 +1327,12 @@ class CoverMediaCard extends HTMLElement {
         this._ctrlVis = true;
         if (this._firstShow) {
           this._firstShow = false;
-          requestAnimationFrame(() => overlay?.classList.add('visible'));
+          requestAnimationFrame(() => {
+            overlayBg?.classList.add('visible');
+            overlay?.classList.add('visible');
+          });
         } else {
+          overlayBg?.classList.add('visible');
           overlay?.classList.add('visible');
         }
       }
