@@ -15,6 +15,7 @@ A Home Assistant Lovelace card that turns your media players into a full-bleed c
 ## Features
 
 - **Cover art background** — artwork fills the entire card. Aspect ratio follows the image automatically, or lock it to square.
+- **App logo fallback** — when no cover art is available, the card shows an app logo (e.g. Netflix, Spotify) if the player reports an `app_name`.
 - **Auto-hiding overlay** — track title, artist, and controls fade out after a configurable timeout. Tap to show them, or they reappear automatically on track change.
 - **Multi-player tabs** — configure multiple media players and switch between them with a tap.
 - **Visual editor** — players, buttons, and settings are all configurable without YAML. Buttons and players can be reordered by drag-and-drop.
@@ -54,7 +55,7 @@ players:
 |---|---|---|
 | `players` | required | One or more media players. |
 | `buttons` | `[play_pause, power]` | Buttons to show, in order. |
-| `aspect_ratio` | `auto` | `auto` follows cover art. `square` forces 1:1. |
+| `aspect_ratio` | `auto` | `auto` follows the cover art ratio (clamped between 16:9 and 9:16). `square` forces 1:1, cover art is cropped. |
 | `auto_hide` | `true` | Auto-hide the overlay when media is playing. |
 | `show_duration` | `10` | Seconds before the overlay hides. |
 | `show_on_change` | `true` | Show the overlay when the track changes. |
@@ -166,3 +167,29 @@ Available condition types:
 | `or` | `conditions: [...]` — at least one must be true |
 
 Time-based conditions are not supported. Use a [template binary sensor](https://www.home-assistant.io/integrations/template/) to expose time-based logic as an entity state.
+
+### Hiding the overlay
+
+The overlay (dark background, track info, and controls) can be hidden using [Card Mod](https://github.com/thomasloven/lovelace-card-mod):
+
+```yaml
+card_mod:
+  style: |
+    ha-card {
+      --cover-media-overlay-display: none;
+    }
+```
+
+---
+
+## App logos
+
+When a media player has no cover art but reports an `app_name`, the card automatically shows a logo from the [`apps/`](https://github.com/klaptafel/ha-cover-media-card/tree/main/apps) folder. The app name is slugified — lowercased with non-alphanumeric characters removed — to determine the filename:
+
+| App name | File |
+|---|---|
+| Netflix | `apps/netflix.png` |
+| Spotify | `apps/spotify.png` |
+| Apple TV | `apps/appletv.png` |
+
+To add a logo for an app, open a pull request with a **500×500px PNG** in the `apps/` folder.
