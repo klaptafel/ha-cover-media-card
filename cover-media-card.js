@@ -49,6 +49,8 @@
  *           entity: media_player.living_room
  *           state_not: "off"
  *   aspect_ratio: auto             # auto | square  (default: auto)
+ *                                  # auto: follows cover art ratio, clamped between 16:9 and 9:16
+ *                                  # square: always 1:1, cover art is cropped
  *   auto_hide: true                # default: true
  *   show_duration: 10              # seconds (default: 10)
  *   show_on_change: true           # default: true
@@ -79,7 +81,7 @@
  * in HA for time-based visibility.
  */
 
-const CARD_VERSION = '0.3.0';
+const CARD_VERSION = '0.4.0';
 
 const LONG_PRESS_MS   = 500;   // long press → more-info
 const PENDING_MS      = 2000;  // optimistic toggle pending window
@@ -255,7 +257,7 @@ class CoverMediaCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     const s    = hass?.states[this._player];
-    let stKey = `${s?.state}|${s?.attributes?.media_title}|${s?.attributes?.media_artist}|${s?.attributes?.app_name}|${s?.attributes?.media_content_type}`;
+    let stKey = `${s?.state}|${s?.attributes?.media_title}|${s?.attributes?.media_artist}|${s?.attributes?.app_name}|${s?.attributes?.media_content_type}|${s?.attributes?.entity_picture}`;
     // Watch all entities referenced in any visibility condition
     const _addEntities = (conds) => {
       if (!conds) return;
@@ -341,20 +343,22 @@ class CoverMediaCard extends HTMLElement {
     });
 
     // Evaluate player visibility conditions
+    let deferredSwitch = -1;
     this._config.players.forEach((p, i) => {
       if (!p.visibility) return;
       const visible = this._evalConditions(p.visibility, p.entity);
       if (this._playerVisibleCache.get(i) !== visible) {
         this._playerVisibleCache.set(i, visible);
         pillChanged = true;
-        if (!visible && i === this._playerIdx) {
+        if (!visible && i === this._playerIdx && deferredSwitch === -1) {
           const first = this._config.players.findIndex((_, j) =>
             this._playerVisibleCache.get(j) !== false
           );
-          if (first !== -1 && first !== this._playerIdx) this._switchPlayer(first);
+          if (first !== -1 && first !== this._playerIdx) deferredSwitch = first;
         }
       }
     });
+    if (deferredSwitch !== -1) { this._switchPlayer(deferredSwitch); return; }
 
     if (!this._rendered) return;
     const st = this._state?.state;
@@ -508,6 +512,8 @@ class CoverMediaCard extends HTMLElement {
     this._statusPriority  = 0;
     this._configError     = false;
     clearTimeout(this._volTimer);
+    clearTimeout(this._hideTimer);
+    this._hideTimer       = null;
     this._groupExpect     = null;
     clearTimeout(this._groupTimer);
     clearTimeout(this._autoSwitchTimer);
@@ -930,6 +936,7 @@ class CoverMediaCard extends HTMLElement {
           background: transparent; opacity: 0;
           transition: opacity .3s ease, background .3s ease;
           pointer-events: none;
+          display: var(--cover-media-overlay-display, block);
         }
         .overlay-background.visible { opacity: 1; background: var(--overlay-bg); }
 
@@ -941,6 +948,7 @@ class CoverMediaCard extends HTMLElement {
           padding: var(--overlay-padding-y) var(--overlay-padding-x);
           opacity: 0; transition: opacity .3s ease;
           pointer-events: none;
+          display: var(--cover-media-overlay-display, flex);
         }
         .overlay-content.visible { opacity: 1; pointer-events: all; }
 
@@ -1133,7 +1141,7 @@ class CoverMediaCard extends HTMLElement {
     }
     const { naturalWidth: w, naturalHeight: h } = img;
     if (!w || !h) return;
-    const pct = Math.max(100, (h / w) * 100);
+    const pct = Math.min(177.78, Math.max(56.25, (h / w) * 100));
     aspect.style.paddingBottom = `${pct.toFixed(2)}%`;
     if (pct !== this._lastAspectPct) {
       this._lastAspectPct = pct;
@@ -1234,7 +1242,7 @@ class CoverMediaCard extends HTMLElement {
 
     // ── Art ───────────────────────────────────────────────
     const { artImg, cardAspect, overlayBg, overlay, mainControls, artPlaceholder, artPlaceholderIcon } = this._el;
-    const artBase = _cacheParam(artUrl);
+    const artBase = artUrl?.includes('cache=') ? _cacheParam(artUrl) : artUrl;
     if (artUrl) {
       if (artBase !== this._lastArtBase) {
         this._lastArtBase = artBase;
@@ -1534,7 +1542,7 @@ class CoverMediaCardEditor extends HTMLElement {
       /* ── Item row ── */
       .item-row {
         display: flex; align-items: center; gap: 6px;
-        min-height: 52px; padding: 0 6px 0 4px;
+        min-height: 52px; padding: 0 12px 0 4px;
       }
 
       .drag-handle {
@@ -1557,7 +1565,7 @@ class CoverMediaCardEditor extends HTMLElement {
       .row-sub { font-size: 11px; color: var(--secondary-text-color); margin-top: 1px; opacity: .65; }
 
       .row-action {
-        width: 36px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+        display: flex; align-items: center; justify-content: center; flex-shrink: 0;
       }
       ha-switch { flex-shrink: 0; }
       .expand-btn { --mdc-icon-button-size: 36px; --mdc-icon-size: 18px; color: var(--secondary-text-color); }
@@ -1607,9 +1615,7 @@ class CoverMediaCardEditor extends HTMLElement {
       .srow-text { flex: 1; }
       .srow-label { font-size: 14px; color: var(--primary-text-color); display: block; }
       .srow-desc  { font-size: 12px; color: var(--secondary-text-color); display: block; margin-top: 1px; }
-      .srow ha-textfield { width: 96px; --text-field-padding: 0 8px; }
-      .srow ha-textfield::part(root)  { height: 36px; }
-      .srow ha-textfield::part(input) { height: 36px; }
+      .srow ha-input { width: 96px; }
       .radio-group { padding: 4px 2px 8px; border-bottom: 1px solid var(--divider-color); }
       .radio-label { font-size: 14px; color: var(--primary-text-color); padding: 8px 0 4px; }
       .radio-group ha-formfield { display: block; margin-left: -8px; }
@@ -1755,7 +1761,7 @@ class CoverMediaCardEditor extends HTMLElement {
     }
     row.appendChild(textWrap);
 
-    const field = document.createElement('ha-textfield');
+    const field = document.createElement('ha-input');
     field.type = 'number';
     field.setAttribute('min',        min);
     field.setAttribute('max',        max);
@@ -2343,9 +2349,9 @@ class CoverMediaCardEditor extends HTMLElement {
     root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: 'General' }));
     const generalGroup = document.createElement('div');
     generalGroup.className = 'settings-group';
-    generalGroup.appendChild(this._mkRadioGroup('Aspect ratio', 'aspect_ratio', [
-      { value: 'auto',   label: 'Auto — square, taller if the cover art is' },
-      { value: 'square', label: 'Square — always 1:1' },
+    generalGroup.appendChild(this._mkRadioGroup('Size', 'aspect_ratio', [
+      { value: 'auto',   label: 'Auto — fits the cover art (16:9 to 9:16)' },
+      { value: 'square', label: 'Square — always 1:1, cover art is cropped' },
     ]));
     generalGroup.appendChild(this._mkNumberRow(
       'Volume step', 'volume_step', 1, 50, '%', 2,
