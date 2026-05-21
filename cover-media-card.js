@@ -52,7 +52,7 @@
  *   ratio_max: "9:16"             # most portrait the card can get  (default: 9:16)
  *                                  # set ratio_min = ratio_max for a fixed aspect ratio
  *   art_style: fill                # fill | fit  (default: fill)
- *   art_background: true           # blur background behind fit art (default: true)
+ *                                  # fit always shows a blurred background behind the art
  *   auto_hide: true                # default: true
  *   show_duration: 10              # seconds (default: 10)
  *   show_on_change: true           # default: true
@@ -222,7 +222,7 @@ function _normalizeConfig(config) {
   return {
     show_duration: 10, auto_hide: true, show_on_change: true,
     ratio_min: '16:9', ratio_max: '9:16',
-    art_style: 'fill', art_background: true,
+    art_style: 'fill',
     volume_step: 2, auto_switch: 0,
     ...config, ...legacyMigration, players, buttons,
   };
@@ -1299,8 +1299,8 @@ class CoverMediaCard extends HTMLElement {
 
     // ── Art ───────────────────────────────────────────────
     const { artImg, artBlur, cardAspect, overlayBg, overlay, mainControls, artPlaceholder, artPlaceholderIcon } = this._el;
-    const artStyle  = this._config.art_style ?? 'fill';
-    const showBlur  = artStyle === 'fit' && (this._config.art_background !== false);
+    const artStyle = this._config.art_style ?? 'fill';
+    const showBlur = artStyle === 'fit';
 
     // Apply fit/fill class
     if (artStyle !== this._lastArtStyle) {
@@ -1511,7 +1511,7 @@ class CoverMediaCardEditor extends HTMLElement {
     const DEFAULTS = {
       show_duration: 10, auto_hide: true, show_on_change: true,
       ratio_min: '16:9', ratio_max: '9:16',
-      art_style: 'fill', art_background: true,
+      art_style: 'fill',
       volume_step: 2, auto_switch: 0,
     };
     const cleanBtns = (btns) => (btns || []).filter(b => !b?._disabled);
@@ -1532,7 +1532,7 @@ class CoverMediaCardEditor extends HTMLElement {
     delete clean.aspect_ratio;
     // Enforce key order: players → buttons → settings (mirrors the GUI tab order).
     const KEY_ORDER = ['players', 'buttons',
-      'ratio_min', 'ratio_max', 'art_style', 'art_background',
+      'ratio_min', 'ratio_max', 'art_style',
       'volume_step', 'auto_hide', 'show_duration', 'show_on_change', 'auto_switch'];
     const ordered = {};
     for (const k of KEY_ORDER)          if (k in clean) ordered[k] = clean[k];
@@ -2535,11 +2535,7 @@ class CoverMediaCardEditor extends HTMLElement {
       { value: 'fill', label: 'Fill — cover art crops to fill the card' },
       { value: 'fit',  label: 'Fit — cover art fully visible, no cropping' },
     ], { rerender: true }));
-    if (artStyle === 'fit') {
-      artGroup.appendChild(this._mkToggleRow('Blurred background', 'art_background', {
-        description: 'Fill empty space with a blurred version of the cover art',
-      }));
-    }
+
     root.appendChild(artGroup);
 
     // ── General ──
