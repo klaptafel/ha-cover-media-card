@@ -48,9 +48,11 @@
  *         - condition: state
  *           entity: media_player.living_room
  *           state_not: "off"
- *   aspect_ratio: auto             # auto | square  (default: auto)
- *                                  # auto: follows cover art ratio, clamped between 16:9 and 9:16
- *                                  # square: always 1:1, cover art is cropped
+ *   ratio_min: "16:9"             # most landscape the card can get (default: 16:9)
+ *   ratio_max: "9:16"             # most portrait the card can get  (default: 9:16)
+ *                                  # set ratio_min = ratio_max for a fixed aspect ratio
+ *   art_style: fill                # fill | fit  (default: fill)
+ *   art_background: true           # blur background behind fit art (default: true)
  *   auto_hide: true                # default: true
  *   show_duration: 10              # seconds (default: 10)
  *   show_on_change: true           # default: true
@@ -81,7 +83,7 @@
  * in HA for time-based visibility.
  */
 
-const CARD_VERSION = '0.4.0';
+const CARD_VERSION = '0.5.0';
 
 const LONG_PRESS_MS   = 500;   // long press → more-info
 const PENDING_MS      = 2000;  // optimistic toggle pending window
@@ -119,6 +121,12 @@ const _appLogoUrl = (appName) => {
   if (!appName) return null;
   const slug = appName.toLowerCase().replace(/[^a-z0-9]/g, '');
   return `https://raw.githubusercontent.com/klaptafel/ha-cover-media-card/main/apps/${slug}.png`;
+};
+
+// Convert a ratio string like "9:16" to a padding-bottom percentage (h/w * 100)
+const _ratioPct = (ratio) => {
+  const [w, h] = ratio.split(':').map(Number);
+  return (h / w) * 100;
 };
 
 const BUTTON_DEFS = {
@@ -199,8 +207,25 @@ function _normalizeConfig(config) {
     buttons = buttons.map(b => b?._disabled === 'group' ? 'group' : b);
   }
 
-  return { show_duration: 10, auto_hide: true, show_on_change: true,
-    aspect_ratio: 'auto', volume_step: 2, auto_switch: 0, ...config, players, buttons };
+  // Migrate legacy aspect_ratio: square → fixed 1:1
+  // Migrate old four portrait/landscape keys → two ratio keys
+  const legacyMigration = {};
+  if (config.aspect_ratio === 'square') {
+    legacyMigration.ratio_min = '1:1';
+    legacyMigration.ratio_max = '1:1';
+  } else if (config.portrait_min || config.portrait_max || config.landscape_min || config.landscape_max) {
+    // Best-effort: use portrait_max as ratio_max and landscape_max as ratio_min
+    if (config.portrait_max)  legacyMigration.ratio_max = config.portrait_max;
+    if (config.landscape_max) legacyMigration.ratio_min = config.landscape_max;
+  }
+
+  return {
+    show_duration: 10, auto_hide: true, show_on_change: true,
+    ratio_min: '16:9', ratio_max: '9:16',
+    art_style: 'fill', art_background: true,
+    volume_step: 2, auto_switch: 0,
+    ...config, ...legacyMigration, players, buttons,
+  };
 }
 
 class CoverMediaCard extends HTMLElement {
@@ -244,6 +269,8 @@ class CoverMediaCard extends HTMLElement {
     this._playerVisibleCache = new Map();
     this._lastState          = null;
     this._trackAnim          = null;
+    this._lastArtStyle       = null;
+    this._lastBlurVisible    = null;
   }
 
   // ── Config ──────────────────────────────────────────────────────────────────
@@ -284,9 +311,7 @@ class CoverMediaCard extends HTMLElement {
   }
 
   getCardSize() {
-    // Return size in 50px units. For square, paddingBottom is always 100% = width.
-    // For auto, we track the last applied ratio. Default to 4 (square-ish) until known.
-    if (this._config?.aspect_ratio !== 'auto') return 4;
+    // Return size in 50px units based on last known aspect ratio. Default to 4 until known.
     return Math.round((this._lastAspectPct ?? 100) / 100 * 4);
   }
 
@@ -529,6 +554,8 @@ class CoverMediaCard extends HTMLElement {
     this._lastBtnStateKey = null;
     this._lastContentType = null;
     this._lastPillKey     = null;
+    this._lastArtStyle    = null;
+    this._lastBlurVisible = null;
     this._updateCard();
     this._showCtrl();
     this._evalVisible();
@@ -880,6 +907,8 @@ class CoverMediaCard extends HTMLElement {
     this._lastBtnStateKey = null;
     this._lastContentType = null;
     this._trackAnim       = null;
+    this._lastArtStyle    = null;
+    this._lastBlurVisible = null;
     const multi = this._config.players.length > 1;
     const st    = this._state?.state;
 
@@ -910,11 +939,22 @@ class CoverMediaCard extends HTMLElement {
         /* Everything inside is absolutely positioned within .card-aspect */
         .card-inner, .art-img, .overlay { position: absolute; inset: 0; }
 
+        .art-blur {
+          position: absolute; inset: 0;
+          width: 100%; height: 100%;
+          object-fit: cover; display: block;
+          filter: blur(24px) brightness(0.6);
+          transform: scale(1.08);
+          opacity: 0; transition: opacity .6s ease;
+        }
+        .art-blur.loaded { opacity: 1; }
+
         .art-img {
           width: 100%; height: 100%;
           object-fit: cover; display: block; opacity: 0; transition: opacity .6s ease;
         }
         .art-img.loaded { opacity: 1; }
+        .art-img.fit { object-fit: contain; }
 
         .art-placeholder {
           position: absolute; inset: 0;
@@ -943,7 +983,7 @@ class CoverMediaCard extends HTMLElement {
         .overlay-content {
           position: absolute; inset: 0;
           z-index: 11;
-          display: flex; flex-direction: column;
+          flex-direction: column;
           align-items: center; justify-content: space-between;
           padding: var(--overlay-padding-y) var(--overlay-padding-x);
           opacity: 0; transition: opacity .3s ease;
@@ -1028,6 +1068,7 @@ class CoverMediaCard extends HTMLElement {
         <div class="card-aspect">
           <div class="card-inner" id="cardInner">
 
+            <img class="art-blur" id="artBlur" src="" alt="" />
             <img class="art-img" id="artImg" src="" alt="" />
             <div class="art-placeholder" id="artPlaceholder">
               <ha-icon id="artPlaceholderIcon" icon="${this._playerIcon(this._playerIdx)}"></ha-icon>
@@ -1111,17 +1152,21 @@ class CoverMediaCard extends HTMLElement {
       });
     }
 
-    const artImg = this.shadowRoot.querySelector('#artImg');
+    const artImg    = this.shadowRoot.querySelector('#artImg');
+    const artBlur   = this.shadowRoot.querySelector('#artBlur');
     const cardAspect = this.shadowRoot.querySelector('.card-aspect');
     artImg.addEventListener('load', () => {
       artImg.classList.add('loaded');
       this._applyAspectRatio(artImg, cardAspect);
     });
     artImg.addEventListener('error', () => artImg.classList.remove('loaded'));
+    artBlur.addEventListener('load',  () => artBlur.classList.add('loaded'));
+    artBlur.addEventListener('error', () => artBlur.classList.remove('loaded'));
 
     // Cache frequently-accessed DOM refs
     this._el = {
       artImg,
+      artBlur,
       cardAspect,
       overlayBg:        this.shadowRoot.querySelector('#overlayBg'),
       overlay:          this.shadowRoot.querySelector('.overlay-content'),
@@ -1132,20 +1177,32 @@ class CoverMediaCard extends HTMLElement {
       artPlaceholder:     this.shadowRoot.querySelector('#artPlaceholder'),
       artPlaceholderIcon: this.shadowRoot.querySelector('#artPlaceholderIcon'),
     };
+    this._applyDefaultRatio();
   }
 
   _applyAspectRatio(img, aspect) {
-    if (this._config.aspect_ratio !== 'auto') {
-      aspect.style.paddingBottom = '100%';
-      return;
-    }
     const { naturalWidth: w, naturalHeight: h } = img;
     if (!w || !h) return;
-    const pct = Math.min(177.78, Math.max(56.25, (h / w) * 100));
+    const rawPct = (h / w) * 100;
+    const minPct = _ratioPct(this._config.ratio_min);
+    const maxPct = _ratioPct(this._config.ratio_max);
+    const pct    = Math.min(maxPct, Math.max(minPct, rawPct));
     aspect.style.paddingBottom = `${pct.toFixed(2)}%`;
     if (pct !== this._lastAspectPct) {
       this._lastAspectPct = pct;
-      // Notify HA's masonry layout that our size changed
+      this.dispatchEvent(new Event('card-size-changed', { bubbles: true, composed: true }));
+    }
+  }
+
+  _applyDefaultRatio() {
+    const aspect = this._el?.cardAspect;
+    if (!aspect) return;
+    const minPct = _ratioPct(this._config.ratio_min);
+    const maxPct = _ratioPct(this._config.ratio_max);
+    const pct    = Math.min(maxPct, Math.max(minPct, 100));
+    aspect.style.paddingBottom = `${pct.toFixed(2)}%`;
+    if (pct !== this._lastAspectPct) {
+      this._lastAspectPct = pct;
       this.dispatchEvent(new Event('card-size-changed', { bubbles: true, composed: true }));
     }
   }
@@ -1241,22 +1298,42 @@ class CoverMediaCard extends HTMLElement {
     const title    = this._attr('media_title') || '';
 
     // ── Art ───────────────────────────────────────────────
-    const { artImg, cardAspect, overlayBg, overlay, mainControls, artPlaceholder, artPlaceholderIcon } = this._el;
+    const { artImg, artBlur, cardAspect, overlayBg, overlay, mainControls, artPlaceholder, artPlaceholderIcon } = this._el;
+    const artStyle  = this._config.art_style ?? 'fill';
+    const showBlur  = artStyle === 'fit' && (this._config.art_background !== false);
+
+    // Apply fit/fill class
+    if (artStyle !== this._lastArtStyle) {
+      this._lastArtStyle = artStyle;
+      artImg.classList.toggle('fit', artStyle === 'fit');
+    }
+
     const artBase = artUrl?.includes('cache=') ? _cacheParam(artUrl) : artUrl;
     if (artUrl) {
       if (artBase !== this._lastArtBase) {
         this._lastArtBase = artBase;
         artImg.classList.remove('loaded');
-        artImg.src = artUrl;
+        artBlur.classList.remove('loaded');
+        artImg.src  = artUrl;
+        artBlur.src = artUrl;
         // ratio applied on load event
       }
     } else {
       if (this._lastArtBase !== '') {
         this._lastArtBase = '';
-        artImg.src = '';
+        artImg.src  = '';
+        artBlur.src = '';
         artImg.classList.remove('loaded');
-        if (cardAspect) cardAspect.style.paddingBottom = '100%';
+        artBlur.classList.remove('loaded');
+        this._applyDefaultRatio();
       }
+    }
+
+    // Show/hide blur layer
+    const blurVisible = showBlur && !!artUrl;
+    if (blurVisible !== this._lastBlurVisible) {
+      this._lastBlurVisible = blurVisible;
+      artBlur.style.display = blurVisible ? '' : 'none';
     }
     if (artPlaceholder) {
       const hasArt = !!artUrl;
@@ -1431,8 +1508,12 @@ class CoverMediaCardEditor extends HTMLElement {
   // Saves config to HA. Does NOT re-render — use for text inputs to preserve focus.
   _fire(config) {
     this._config = config;
-    const DEFAULTS = { show_duration: 10, auto_hide: true, show_on_change: true,
-      aspect_ratio: 'auto', volume_step: 2, auto_switch: 0 };
+    const DEFAULTS = {
+      show_duration: 10, auto_hide: true, show_on_change: true,
+      ratio_min: '16:9', ratio_max: '9:16',
+      art_style: 'fill', art_background: true,
+      volume_step: 2, auto_switch: 0,
+    };
     const cleanBtns = (btns) => (btns || []).filter(b => !b?._disabled);
     const clean = {
       ...config,
@@ -1447,9 +1528,12 @@ class CoverMediaCardEditor extends HTMLElement {
     for (const [k, v] of Object.entries(DEFAULTS)) {
       if (clean[k] === v) delete clean[k];
     }
+    // Strip legacy aspect_ratio key
+    delete clean.aspect_ratio;
     // Enforce key order: players → buttons → settings (mirrors the GUI tab order).
-    const KEY_ORDER = ['players', 'buttons', 'aspect_ratio', 'volume_step',
-      'auto_hide', 'show_duration', 'show_on_change', 'auto_switch'];
+    const KEY_ORDER = ['players', 'buttons',
+      'ratio_min', 'ratio_max', 'art_style', 'art_background',
+      'volume_step', 'auto_hide', 'show_duration', 'show_on_change', 'auto_switch'];
     const ordered = {};
     for (const k of KEY_ORDER)          if (k in clean) ordered[k] = clean[k];
     for (const k of Object.keys(clean)) if (!(k in ordered)) ordered[k] = clean[k];
@@ -1620,6 +1704,24 @@ class CoverMediaCardEditor extends HTMLElement {
       .radio-label { font-size: 14px; color: var(--primary-text-color); padding: 8px 0 4px; }
       .radio-group ha-formfield { display: block; margin-left: -8px; }
 
+      /* ── Aspect ratio picker ── */
+      .aspect-picker { display: flex; gap: 16px; align-items: flex-start; margin-top: 8px; }
+      .aspect-row { display: flex; align-items: flex-start; gap: 12px; }
+      .aspect-rect { position: absolute; border-radius: 3px; }
+      .aspect-rect-outer { background: var(--primary-color); opacity: 0.2; }
+      .aspect-rect-inner { background: var(--primary-color); opacity: 0.55; border-radius: 2px; }
+      .aspect-dropdowns { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+      .aspect-select-wrap { display: flex; align-items: center; gap: 6px; }
+      .aspect-select-label { font-size: 12px; color: var(--secondary-text-color); width: 28px; flex-shrink: 0; }
+      .aspect-select {
+        flex: 1; height: 32px; border-radius: 6px; min-width: 0;
+        border: 1px solid var(--divider-color);
+        background: var(--secondary-background-color, rgba(0,0,0,.04));
+        color: var(--primary-text-color);
+        font-family: inherit; font-size: 13px; padding: 0 6px; cursor: pointer;
+      }
+      .aspect-select:focus { outline: 2px solid var(--primary-color); outline-offset: -1px; border-color: transparent; }
+
       /* ── Version link ── */
       .version-link {
         display: block; font-size: 11px; color: var(--secondary-text-color);
@@ -1787,7 +1889,7 @@ class CoverMediaCardEditor extends HTMLElement {
     return row;
   }
 
-  _mkRadioGroup(label, key, options) {
+  _mkRadioGroup(label, key, options, { rerender = false } = {}) {
     const wrap = document.createElement('div');
     wrap.className = 'radio-group';
     wrap.appendChild(Object.assign(document.createElement('div'), { className: 'radio-label', textContent: label }));
@@ -1804,11 +1906,86 @@ class CoverMediaCardEditor extends HTMLElement {
         wrap.querySelectorAll(`ha-radio[name="${key}"]`).forEach(r => {
           if (r !== radio) r.removeAttribute('checked');
         });
-        this._fire({ ...this._config, [key]: value });
+        const cfg = { ...this._config, [key]: value };
+        rerender ? this._fireAndRender(cfg) : this._fire(cfg);
       });
       ff.appendChild(radio);
       wrap.appendChild(ff);
     });
+    return wrap;
+  }
+
+  // ── Aspect ratio picker ───────────────────────────────────────────────────
+
+  _mkAspectPicker() {
+    const RATIOS = [
+      { value: '16:9' }, { value: '3:2' }, { value: '4:3' },
+      { value: '5:4' }, { value: '1:1' }, { value: '4:5' },
+      { value: '3:4' }, { value: '2:3' }, { value: '9:16' },
+    ];
+
+    const minVal = this._config.ratio_min;
+    const maxVal = this._config.ratio_max;
+    const minPct = _ratioPct(minVal);
+    const maxPct = _ratioPct(maxVal);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'aspect-picker';
+
+    // ── Preview ──
+    const BASE        = 48;
+    const CONTAINER_H = Math.round(BASE * _ratioPct('9:16') / 100);
+    const preview     = document.createElement('div');
+    preview.style.cssText = `position:relative;flex-shrink:0;width:${BASE}px;height:${CONTAINER_H}px;`;
+
+    const outerH = Math.round(BASE * maxPct / 100);
+    const innerH = Math.round(BASE * minPct / 100);
+    const outer  = Object.assign(document.createElement('div'), { className: 'aspect-rect aspect-rect-outer' });
+    outer.style.cssText = `top:0;left:0;width:${BASE}px;height:${outerH}px;`;
+    const inner  = Object.assign(document.createElement('div'), { className: 'aspect-rect aspect-rect-inner' });
+    inner.style.cssText = `top:0;left:0;width:${BASE}px;height:${innerH}px;`;
+    preview.append(outer, inner);
+
+    const row = document.createElement('div');
+    row.className = 'aspect-row';
+    row.appendChild(preview);
+
+    // ── Dropdowns ──
+    const dropdowns = document.createElement('div');
+    dropdowns.className = 'aspect-dropdowns';
+
+    const mkSelect = (labelText, key, filterFn) => {
+      const selectWrap = document.createElement('div');
+      selectWrap.className = 'aspect-select-wrap';
+      selectWrap.appendChild(Object.assign(document.createElement('span'), {
+        className: 'aspect-select-label', textContent: labelText,
+      }));
+      const sel = document.createElement('select');
+      sel.className = 'aspect-select';
+      RATIOS.filter(r => filterFn(r.value)).forEach(opt => {
+        const o = Object.assign(document.createElement('option'), {
+          value: opt.value, textContent: opt.value,
+        });
+        if (opt.value === this._config[key]) o.selected = true;
+        sel.appendChild(o);
+      });
+      sel.addEventListener('change', () => {
+        let cfg = { ...this._config, [key]: sel.value };
+        // Auto-correct: min can never be more portrait than max
+        if (_ratioPct(cfg.ratio_min) > _ratioPct(cfg.ratio_max)) {
+          if (key === 'ratio_min') cfg.ratio_max = sel.value;
+          else                     cfg.ratio_min = sel.value;
+        }
+        this._fireAndRender(cfg);
+      });
+      selectWrap.appendChild(sel);
+      return selectWrap;
+    };
+
+    dropdowns.appendChild(mkSelect('Min', 'ratio_min', v => _ratioPct(v) <= maxPct));
+    dropdowns.appendChild(mkSelect('Max', 'ratio_max', v => _ratioPct(v) >= minPct));
+    row.appendChild(dropdowns);
+    wrap.appendChild(row);
     return wrap;
   }
 
@@ -2345,14 +2522,30 @@ class CoverMediaCardEditor extends HTMLElement {
       return k === 'volume_up' || k === 'volume_down';
     });
 
+    // ── Aspect ratio ──
+    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: 'Aspect ratio' }));
+    root.appendChild(this._mkAspectPicker());
+
+    // ── Art ──
+    const artStyle = this._config.art_style ?? 'fill';
+    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: 'Art' }));
+    const artGroup = document.createElement('div');
+    artGroup.className = 'settings-group';
+    artGroup.appendChild(this._mkRadioGroup('Style', 'art_style', [
+      { value: 'fill', label: 'Fill — cover art crops to fill the card' },
+      { value: 'fit',  label: 'Fit — cover art fully visible, no cropping' },
+    ], { rerender: true }));
+    if (artStyle === 'fit') {
+      artGroup.appendChild(this._mkToggleRow('Blurred background', 'art_background', {
+        description: 'Fill empty space with a blurred version of the cover art',
+      }));
+    }
+    root.appendChild(artGroup);
+
     // ── General ──
     root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: 'General' }));
     const generalGroup = document.createElement('div');
     generalGroup.className = 'settings-group';
-    generalGroup.appendChild(this._mkRadioGroup('Size', 'aspect_ratio', [
-      { value: 'auto',   label: 'Auto — fits the cover art (16:9 to 9:16)' },
-      { value: 'square', label: 'Square — always 1:1, cover art is cropped' },
-    ]));
     generalGroup.appendChild(this._mkNumberRow(
       'Volume step', 'volume_step', 1, 50, '%', 2,
       'How much the volume changes per button press',
