@@ -14,8 +14,8 @@ A Home Assistant Lovelace card that turns your media players into a full-bleed c
 
 ## Features
 
-- **Cover art background** — artwork fills the entire card. Aspect ratio follows the image automatically, or lock it to square.
-- **App logo fallback** — when no cover art is available, the card shows an app logo (e.g. Netflix, Spotify) if the player reports an `app_name`.
+- **Cover art background** — artwork fills the entire card. Choose `fill` (default, crops to fit) or `fit` (fully visible with blurred background). Aspect ratio follows the cover art, clamped to configurable min/max bounds.
+- **App logo fallback** — when no cover art is available, the card shows an app logo (e.g. Netflix, Youtube) if the player reports an `app_name`.
 - **Auto-hiding overlay** — track title, artist, and controls fade out after a configurable timeout. Tap to show them, or they reappear automatically on track change.
 - **Multi-player tabs** — configure multiple media players and switch between them with a tap.
 - **Visual editor** — players, buttons, and settings are all configurable without YAML. Buttons and players can be reordered by drag-and-drop.
@@ -55,7 +55,9 @@ players:
 |---|---|---|
 | `players` | required | One or more media players. |
 | `buttons` | `[play_pause, power]` | Buttons to show, in order. |
-| `aspect_ratio` | `auto` | `auto` follows the cover art ratio (clamped between 16:9 and 9:16). `square` forces 1:1, cover art is cropped. |
+| `ratio_min` | `16:9` | Most landscape the card can get. |
+| `ratio_max` | `9:16` | Most portrait the card can get. Set equal to `ratio_min` for a fixed ratio. |
+| `art_style` | `fill` | `fill` crops art to fill the card. `fit` shows art fully with a blurred background. |
 | `auto_hide` | `true` | Auto-hide the overlay when media is playing. |
 | `show_duration` | `10` | Seconds before the overlay hides. |
 | `show_on_change` | `true` | Show the overlay when the track changes. |
