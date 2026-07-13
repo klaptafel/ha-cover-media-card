@@ -53,6 +53,11 @@
  *                                  # set ratio_min = ratio_max for a fixed aspect ratio
  *   art_style: fill                # fill | fit  (default: fill)
  *                                  # fit always shows a blurred background behind the art
+ *   art_edge_to_edge: true         # fit only: art fills card edge-to-edge (default: true)
+ *                                  # set to false for padding, radius and shadow around art
+ *   art_padding: 8                 # fit + edge_to_edge:false: padding in % (default: 8)
+ *   art_radius: 12                 # fit + edge_to_edge:false: border radius in px
+ *                                  # default: auto — ha-card radius + padding * 0.15, max 64px
  *   auto_hide: true                # default: true
  *   show_duration: 10              # seconds (default: 10)
  *   show_on_change: true           # default: true
@@ -83,12 +88,131 @@
  * in HA for time-based visibility.
  */
 
-const CARD_VERSION = '0.5.0';
+const CARD_VERSION = '0.6.0';
 
 const LONG_PRESS_MS   = 500;   // long press → more-info
 const PENDING_MS      = 2000;  // optimistic toggle pending window
 const GROUP_WATCHDOG_MS = 8000; // group operation timeout
 const STATUS_MS              = 2000;  // default status flash duration
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Translations
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TRANSLATIONS = {
+  en: {
+    lang: 'en',
+    btn_previous: 'Previous', btn_play_pause: 'Play/Pause', btn_next: 'Next',
+    btn_shuffle: 'Shuffle', btn_repeat: 'Repeat',
+    btn_volume_up: 'Volume up', btn_volume_down: 'Volume down',
+    btn_power: 'Power', btn_group: 'Group',
+    volume: 'Volume', volume_up_flash: 'Volume +', volume_down_flash: 'Volume −',
+    ungrouping: 'Ungrouping…', grouping: 'Grouping…',
+    grouping_failed: 'Grouping failed', ungroup_failed: 'Ungroup failed',
+    grouped: 'Grouped', ungrouped: 'Ungrouped',
+    error_no_player: 'No player configured',
+    error_no_player_sub: 'Add a media player in the card editor',
+    error_player_not_found: 'Player not found',
+    error_players_not_found: 'Players not found',
+    error_some_players_not_found: 'Some players not found',
+    tab_players: 'Players', tab_buttons: 'Buttons', tab_settings: 'Settings',
+    drag_to_reorder: 'Drag to reorder',
+    no_players_configured: 'No players configured. Add one below to get started.',
+    entity: 'Entity', display_name: 'Display name',
+    group_members: 'Group members',
+    group_members_desc: 'Works best between speakers of the same brand',
+    add_player: 'Add player',
+    row_volume_down: 'Volume down', row_volume_up: 'Volume up',
+    row_previous: 'Previous', row_play_pause: 'Play / Pause', row_next: 'Next',
+    row_shuffle: 'Shuffle', row_repeat: 'Repeat', row_power: 'Power', row_group: 'Group',
+    custom_button_fallback: 'Custom button',
+    field_icon: 'Icon', field_label_tooltip: 'Label (tooltip)',
+    button_header: 'Button', action_header: 'Action',
+    choose_action_hint: 'Choose an action above to make this button do something.',
+    add_custom_button: 'Add custom button',
+    default_custom_button_label: 'More info',
+    section_aspect_ratio: 'Aspect ratio', aspect_min: 'Min', aspect_max: 'Max',
+    section_art: 'Art', style: 'Style',
+    art_fill: 'Fill',
+    art_fit: 'Fit',
+    edge_to_edge: 'Edge to edge', padding: 'Padding',
+    section_general: 'General',
+    volume_step: 'Volume step',
+    volume_step_desc: 'How much the volume changes per button press',
+    volume_step_disabled: 'Add a volume up or down button to use this',
+    section_overlay: 'Overlay',
+    auto_hide: 'Auto-hide',
+    auto_hide_desc: 'Hide the controls after a few seconds during playback',
+    show_duration: 'Show duration',
+    show_duration_desc: 'How long the controls stay visible before hiding',
+    overlay_disabled_reason: 'Only applies when auto-hide is on',
+    show_on_change: 'Show on change',
+    show_on_change_desc: 'Briefly re-show the controls when the media changes',
+    section_player_switching: 'Player switching',
+    auto_switch: 'Auto switch',
+    auto_switch_desc: 'Switches to another player when it starts playing and this one is idle',
+    multi_required: 'Add more than one player to use this',
+    delay: 'Delay',
+    delay_desc: 'Wait this long before switching, in case the current player resumes',
+    enable_auto_switch: 'Enable auto switch to use this',
+  },
+  nl: {
+    lang: 'nl',
+    btn_previous: 'Vorige', btn_play_pause: 'Afspelen/pauzeren', btn_next: 'Volgende',
+    btn_shuffle: 'Shuffle', btn_repeat: 'Herhalen',
+    btn_volume_up: 'Volume omhoog', btn_volume_down: 'Volume omlaag',
+    btn_power: 'Aan/uit', btn_group: 'Groeperen',
+    volume: 'Volume', volume_up_flash: 'Volume +', volume_down_flash: 'Volume −',
+    ungrouping: 'Groep opheffen…', grouping: 'Groeperen…',
+    grouping_failed: 'Groeperen mislukt', ungroup_failed: 'Groep opheffen mislukt',
+    grouped: 'Gegroepeerd', ungrouped: 'Groep opgeheven',
+    error_no_player: 'Geen speler geconfigureerd',
+    error_no_player_sub: 'Voeg een mediaspeler toe in de kaart-editor',
+    error_player_not_found: 'Speler niet gevonden',
+    error_players_not_found: 'Spelers niet gevonden',
+    error_some_players_not_found: 'Sommige spelers niet gevonden',
+    tab_players: 'Spelers', tab_buttons: 'Knoppen', tab_settings: 'Instellingen',
+    drag_to_reorder: 'Sleep om te herschikken',
+    no_players_configured: 'Geen spelers geconfigureerd. Voeg er hieronder een toe om te beginnen.',
+    entity: 'Entiteit', display_name: 'Weergavenaam',
+    group_members: 'Groepsleden',
+    group_members_desc: 'Werkt het beste tussen speakers van hetzelfde merk',
+    add_player: 'Speler toevoegen',
+    row_volume_down: 'Volume omlaag', row_volume_up: 'Volume omhoog',
+    row_previous: 'Vorige', row_play_pause: 'Afspelen / pauzeren', row_next: 'Volgende',
+    row_shuffle: 'Shuffle', row_repeat: 'Herhalen', row_power: 'Aan/uit', row_group: 'Groeperen',
+    custom_button_fallback: 'Aangepaste knop',
+    field_icon: 'Icoon', field_label_tooltip: 'Label (tooltip)',
+    button_header: 'Knop', action_header: 'Actie',
+    choose_action_hint: 'Kies hierboven een actie om deze knop iets te laten doen.',
+    add_custom_button: 'Aangepaste knop toevoegen',
+    default_custom_button_label: 'Meer info',
+    section_aspect_ratio: 'Beeldverhouding', aspect_min: 'Min', aspect_max: 'Max',
+    section_art: 'Coverafbeelding', style: 'Stijl',
+    art_fill: 'Vullen',
+    art_fit: 'Passend',
+    edge_to_edge: 'Randloos', padding: 'Padding',
+    section_general: 'Algemeen',
+    volume_step: 'Volumestap',
+    volume_step_desc: 'Hoeveel het volume wijzigt per druk op de knop',
+    volume_step_disabled: 'Voeg een volume-omhoog- of omlaag-knop toe om dit te gebruiken',
+    section_overlay: 'Overlay',
+    auto_hide: 'Automatisch verbergen',
+    auto_hide_desc: 'Verberg de bediening na een paar seconden tijdens het afspelen',
+    show_duration: 'Zichtbaarheidsduur',
+    show_duration_desc: 'Hoe lang de bediening zichtbaar blijft voordat deze verbergt',
+    overlay_disabled_reason: 'Alleen van toepassing als automatisch verbergen aan staat',
+    show_on_change: 'Tonen bij wijziging',
+    show_on_change_desc: 'Toon de bediening kort opnieuw wanneer de media wijzigt',
+    section_player_switching: 'Wisselen van speler',
+    auto_switch: 'Automatisch wisselen',
+    auto_switch_desc: 'Wisselt naar een andere speler zodra die begint met afspelen en deze inactief is',
+    multi_required: 'Voeg meer dan één speler toe om dit te gebruiken',
+    delay: 'Vertraging',
+    delay_desc: 'Wacht zo lang voor het wisselt, voor het geval de huidige speler hervat',
+    enable_auto_switch: 'Zet automatisch wisselen aan om dit te gebruiken',
+  },
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Button definitions
@@ -113,9 +237,20 @@ const F = {
 const LIVE_TYPES = new Set(['radio', 'channel', 'url']);
 
 const mkIcon = (mdi) => `<ha-icon icon="${mdi}"></ha-icon>`;
-const _entityName = (entity, hass) =>
-  hass?.states[entity]?.attributes?.friendly_name
-  || entity.split('.')[1]?.replace(/_/g, ' ') || entity;
+// Prefers HA's own registry-aware name composition (device+entity name,
+// area overrides, etc. — same logic HA core itself uses) when available;
+// falls back to a plain friendly_name/humanized-entity_id lookup for older
+// HA versions that don't have formatEntityName yet, or when the entity
+// doesn't exist in hass.states at all (formatEntityName requires a real
+// stateObj).
+const _entityName = (entity, hass) => {
+  const stateObj = hass?.states[entity];
+  if (stateObj && typeof hass.formatEntityName === 'function') {
+    return hass.formatEntityName(stateObj);
+  }
+  return stateObj?.attributes?.friendly_name
+    || entity.split('.')[1]?.replace(/_/g, ' ') || entity;
+};
 const _cacheParam = (url) => url?.match(/[?&]cache=([^&]*)/)?.[1] ?? url?.split('?')[0] ?? '';
 const _appLogoUrl = (appName) => {
   if (!appName) return null;
@@ -191,6 +326,38 @@ function _normalizeButtons(buttons) {
   return buttons;
 }
 
+// Single source of truth — shared by CoverMediaCard.setConfig and the editor.
+const CARD_DEFAULTS = {
+  show_duration: 10, auto_hide: true, show_on_change: true,
+  ratio_min: '16:9', ratio_max: '9:16',
+  art_style: 'fill', art_edge_to_edge: true, art_padding: 8, art_radius: null,
+  volume_step: 2, auto_switch: 0,
+};
+
+function deepEqual(a, b) {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => deepEqual(v, b[i]));
+  }
+  if (a && b && typeof a === 'object' && typeof b === 'object') {
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    return [...keys].every((k) => deepEqual(a[k], b[k]));
+  }
+  return a === b;
+}
+
+// Only keep keys that differ from CARD_DEFAULTS (or have no default at all,
+// e.g. `players`/`buttons`) — _normalizeConfig merges every default into
+// _config for internal rendering, but firing that whole merged object back
+// would persist every untouched default into the saved YAML.
+function stripDefaults(config) {
+  const out = {};
+  for (const [key, value] of Object.entries(config)) {
+    if (key in CARD_DEFAULTS && deepEqual(value, CARD_DEFAULTS[key])) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 function _normalizeConfig(config) {
   let buttons = _normalizeButtons([...(config.buttons || DEFAULT_BUTTONS)]);
 
@@ -220,10 +387,7 @@ function _normalizeConfig(config) {
   }
 
   return {
-    show_duration: 10, auto_hide: true, show_on_change: true,
-    ratio_min: '16:9', ratio_max: '9:16',
-    art_style: 'fill',
-    volume_step: 2, auto_switch: 0,
+    ...CARD_DEFAULTS,
     ...config, ...legacyMigration, players, buttons,
   };
 }
@@ -315,10 +479,16 @@ class CoverMediaCard extends HTMLElement {
     return Math.round((this._lastAspectPct ?? 100) / 100 * 4);
   }
 
+  getGridOptions() {
+    // Full-width, auto height — same as package-tracker-card, on request.
+    return { columns: 'full', rows: 'auto' };
+  }
+
   // ── Accessors ───────────────────────────────────────────────────────────────
 
   get _player()  { return this._config.players[this._playerIdx]?.entity ?? null; }
   get _state()   { return this._hass?.states[this._player] ?? null; }
+  get _tr()      { return TRANSLATIONS[this._hass?.language] || TRANSLATIONS.en; }
   get _grouped() { return (this._attr('group_members')?.length ?? 0) > 1; }
   _attr(a)       { return this._state?.attributes?.[a] ?? null; }
 
@@ -705,8 +875,8 @@ class CoverMediaCard extends HTMLElement {
       this._flashVol(next);
     } else if (supported & F.VOLUME_STEP) {
       this._call(delta > 0 ? 'volume_up' : 'volume_down');
-      const _sub = this._grouped ? `Volume · ${this._playerName(this._playerIdx)}` : '';
-      this._flashStatus(delta > 0 ? 'Volume +' : 'Volume −', _sub, 1);
+      const _sub = this._grouped ? `${this._tr.volume} · ${this._playerName(this._playerIdx)}` : '';
+      this._flashStatus(delta > 0 ? this._tr.volume_up_flash : this._tr.volume_down_flash, _sub, 1);
     }
   }
   _flashStatus(title, sub, priority = 1, duration = STATUS_MS) {
@@ -732,7 +902,8 @@ class CoverMediaCard extends HTMLElement {
     }, duration);
   }
   _flashVol(level) {
-    const sub = this._grouped ? `Volume · ${this._playerName(this._playerIdx)}` : 'Volume';
+    const tr  = this._tr;
+    const sub = this._grouped ? `${tr.volume} · ${this._playerName(this._playerIdx)}` : tr.volume;
     this._flashStatus(`${Math.round(level * 100)}%`, sub, 1);
   }
 
@@ -768,6 +939,7 @@ class CoverMediaCard extends HTMLElement {
 
   _group() {
     if (!this._hass || !this._player) return;
+    const tr      = this._tr;
     const player  = this._config.players[this._playerIdx];
     const members = player?.group_members ?? [];
     if (!members.length && !this._grouped) return;
@@ -787,17 +959,17 @@ class CoverMediaCard extends HTMLElement {
     if (grouped) {
       this._hass.callService('media_player', 'unjoin', {}, { entity_id: this._player });
       this._groupExpect = false;
-      this._flashStatus('Ungrouping…', memberNames, 2, 9000);
+      this._flashStatus(tr.ungrouping, memberNames, 2, 9000);
     } else {
       this._hass.callService('media_player', 'join',
         { group_members: members }, { entity_id: this._player });
       this._groupExpect = true;
-      this._flashStatus('Grouping…', memberNames, 2, 9000);
+      this._flashStatus(tr.grouping, memberNames, 2, 9000);
     }
     clearTimeout(this._groupTimer);
     this._groupTimer = setTimeout(() => {
       if (this._groupExpect === null) return; // already resolved
-      this._flashStatus(this._groupExpect ? 'Grouping failed' : 'Ungroup failed', memberNames, 2, 2500);
+      this._flashStatus(this._groupExpect ? tr.grouping_failed : tr.ungroup_failed, memberNames, 2, 2500);
       // Keep _groupExpect set so we still catch a late HA confirmation
     }, GROUP_WATCHDOG_MS);
   }
@@ -844,7 +1016,7 @@ class CoverMediaCard extends HTMLElement {
           if (def.feature && (supported & def.feature) === 0) return;
         }
         if (this._visibleCache.get(idx) === false) return;
-        result.push({ key, ...def });
+        result.push({ key, ...def, label: this._tr['btn_' + key] ?? def.label });
       } else if (item && typeof item === 'object') {
         if (this._visibleCache.get(idx) === false) { ci++; return; }
         result.push({ isCustom: true, ci: ci++, icon: item.icon, label: item.label || '' });
@@ -929,7 +1101,8 @@ class CoverMediaCard extends HTMLElement {
           display: block; position: relative; overflow: hidden;
           isolation: isolate;
           cursor: pointer; user-select: none; -webkit-tap-highlight-color: transparent;
-          font-family: var(--primary-font-family, sans-serif);
+          font-family: var(--ha-font-family-body, inherit);
+          -webkit-font-smoothing: var(--ha-font-smoothing, antialiased);
         }
         /* Aspect ratio wrapper — height driven by padding-bottom trick */
         .card-aspect {
@@ -998,7 +1171,8 @@ class CoverMediaCard extends HTMLElement {
           display: flex; align-items: center; gap: 6px;
           padding: 6px 14px 6px 10px; border-radius: 999px; border: none;
           background: var(--pill-bg); color: rgba(255,255,255,0.7);
-          font-family: inherit; font-size: 13px; font-weight: 500;
+          font-family: inherit; font-size: 13px; /* deliberately off-scale, between --ha-font-size-s/m */
+          font-weight: var(--ha-font-weight-medium, 500);
           cursor: pointer; white-space: nowrap;
           transition: background .2s, color .2s;
           max-width: calc(100% - var(--overlay-padding-x) * 2);
@@ -1036,12 +1210,14 @@ class CoverMediaCard extends HTMLElement {
         @keyframes ca-pulse { 0%,100% { opacity:1; } 50% { opacity:.45; } }
         .center-area.pulse { animation: ca-pulse .35s ease; }
         .track-title {
-          font-size: clamp(20px,6.5vw,28px); font-weight: 700; color: #fff;
-          text-shadow: 0 1px 8px rgba(0,0,0,.6); line-height: 1.2;
+          font-size: clamp(var(--ha-font-size-xl, 20px), 6.5vw, var(--ha-font-size-3xl, 28px));
+          font-weight: var(--ha-font-weight-bold, 700); color: #fff;
+          text-shadow: 0 1px 8px rgba(0,0,0,.6); line-height: var(--ha-line-height-condensed, 1.2);
           word-break: break-word; max-width: 100%; overflow: hidden;
         }
         .track-artist {
-          font-size: clamp(12px,3.5vw,16px); color: rgba(255,255,255,.75);
+          font-size: clamp(var(--ha-font-size-s, 12px), 3.5vw, var(--ha-font-size-l, 16px));
+          color: rgba(255,255,255,.75);
           text-shadow: 0 1px 4px rgba(0,0,0,.5);
           word-break: break-word; max-width: 100%; overflow: hidden;
         }
@@ -1158,6 +1334,7 @@ class CoverMediaCard extends HTMLElement {
     artImg.addEventListener('load', () => {
       artImg.classList.add('loaded');
       this._applyAspectRatio(artImg, cardAspect);
+      this._applyFitPadding();
     });
     artImg.addEventListener('error', () => artImg.classList.remove('loaded'));
     artBlur.addEventListener('load',  () => artBlur.classList.add('loaded'));
@@ -1168,6 +1345,8 @@ class CoverMediaCard extends HTMLElement {
       artImg,
       artBlur,
       cardAspect,
+      cardInner:        inner,
+      haCard:           this.shadowRoot.querySelector('ha-card'),
       overlayBg:        this.shadowRoot.querySelector('#overlayBg'),
       overlay:          this.shadowRoot.querySelector('.overlay-content'),
       trackTitle:       this.shadowRoot.querySelector('#trackTitle'),
@@ -1178,6 +1357,17 @@ class CoverMediaCard extends HTMLElement {
       artPlaceholderIcon: this.shadowRoot.querySelector('#artPlaceholderIcon'),
     };
     this._applyDefaultRatio();
+
+    // Recalculate fit sizing whenever the card is resized (e.g. in popups).
+    // _render() reruns on every config change (unlike slideshow-card's
+    // one-time setup), so the previous observer -- now watching a detached,
+    // orphaned #cardInner from the just-replaced shadow DOM -- has to be
+    // disconnected first, or it leaks one more dead observer on every edit.
+    this._resizeObserver?.disconnect();
+    if (window.ResizeObserver) {
+      this._resizeObserver = new ResizeObserver(() => this._applyFitPadding());
+      this._resizeObserver.observe(inner);
+    }
   }
 
   _applyAspectRatio(img, aspect) {
@@ -1205,6 +1395,79 @@ class CoverMediaCard extends HTMLElement {
       this._lastAspectPct = pct;
       this.dispatchEvent(new Event('card-size-changed', { bubbles: true, composed: true }));
     }
+  }
+
+  /**
+   * Fit mode only (fill mode clears this and lets .art-img's own CSS
+   * object-fit:cover fill the whole card, same as before). Ported from
+   * slideshow-card's identically-named method, adapted for a single image
+   * (no crossfade-layer pair to keep in sync here).
+   *
+   * edge_to_edge:true (default) still explicitly sizes/positions the art
+   * absolutely within #cardInner (padPx=0) rather than leaving it to plain
+   * CSS inset:0 -- needed so the *pixel-accurate* centering math below
+   * (which accounts for the image's real aspect ratio, not just
+   * object-fit:contain's own centering) stays correct if edge_to_edge is
+   * later toggled off without an intervening reload.
+   *
+   * edge_to_edge:false additionally applies a border radius (explicit
+   * art_radius, or an auto value derived from ha-card's own corner radius)
+   * and a drop shadow around the now-inset art.
+   */
+  _applyFitPadding() {
+    const { cardInner, artImg, haCard } = this._el ?? {};
+    if (!cardInner || !artImg) return;
+
+    const isFit  = (this._config.art_style ?? 'fill') === 'fit';
+    const noEdge = isFit && !(this._config.art_edge_to_edge ?? true);
+
+    if (!isFit) {
+      // Only clear fit-mode positioning properties, never opacity --
+      // opacity is managed by the .art-img.loaded CSS transition.
+      const FIT_PROPS = ['position', 'top', 'left', 'width', 'height',
+                          'objectFit', 'borderRadius', 'boxShadow'];
+      FIT_PROPS.forEach(p => { artImg.style[p] = ''; });
+      return;
+    }
+
+    const cW = cardInner.offsetWidth;
+    const cH = cardInner.offsetHeight;
+    if (!cW || !cH || !artImg.naturalWidth || !artImg.naturalHeight) return;
+
+    const padPx = noEdge ? Math.round(cW * (this._config.art_padding ?? 8) / 100) : 0;
+    const aW    = cW - 2 * padPx;
+    const aH    = cH - 2 * padPx;
+
+    const ir = artImg.naturalWidth / artImg.naturalHeight;
+    const rW = ir > aW / aH ? aW : Math.round(aH * ir);
+    const rH = ir > aW / aH ? Math.round(aW / ir) : aH;
+
+    // Centre within the padded area
+    const left = padPx + Math.round((aW - rW) / 2);
+    const top  = padPx + Math.round((aH - rH) / 2);
+
+    let radius = '';
+    let shadow = '';
+    if (noEdge) {
+      let r;
+      if (this._config.art_radius != null) {
+        r = this._config.art_radius;
+      } else {
+        const haRadius = haCard ? parseFloat(getComputedStyle(haCard).borderTopLeftRadius) || 0 : 0;
+        r              = Math.min(haRadius + padPx * 0.15, 64);
+      }
+      radius = `${r}px`;
+      shadow = '0 6px 24px rgba(0,0,0,.5)';
+    }
+
+    artImg.style.position     = 'absolute';
+    artImg.style.left         = `${left}px`;
+    artImg.style.top          = `${top}px`;
+    artImg.style.width        = `${rW}px`;
+    artImg.style.height       = `${rH}px`;
+    artImg.style.objectFit    = 'fill';
+    artImg.style.borderRadius = radius;
+    artImg.style.boxShadow    = shadow;
   }
 
   // ── Update ──────────────────────────────────────────────────────────────────
@@ -1250,18 +1513,19 @@ class CoverMediaCard extends HTMLElement {
 
   _updateConfigError() {
     const players = this._config.players;
+    const tr      = this._tr;
     let title = '', sub = '';
 
     if (!players.length) {
-      title = 'No player configured';
-      sub   = 'Add a media player in the card editor';
+      title = tr.error_no_player;
+      sub   = tr.error_no_player_sub;
     } else {
       const missing = players.filter(p => p.entity && !this._hass?.states[p.entity]);
       if (missing.length === players.length) {
-        title = missing.length === 1 ? 'Player not found' : 'Players not found';
+        title = missing.length === 1 ? tr.error_player_not_found : tr.error_players_not_found;
         sub   = missing.map(p => p.name || p.entity).join(', ');
       } else if (missing.length > 0) {
-        title = 'Some players not found';
+        title = tr.error_some_players_not_found;
         sub   = missing.map(p => p.name || p.entity).join(', ');
       }
     }
@@ -1363,7 +1627,7 @@ class CoverMediaCard extends HTMLElement {
             return idx !== -1 ? this._playerName(idx) : _entityName(e, this._hass);
           })
           .join(' · ');
-        this._flashStatus(grouped ? 'Grouped' : 'Ungrouped', successNames, 2, 1500);
+        this._flashStatus(grouped ? this._tr.grouped : this._tr.ungrouped, successNames, 2, 1500);
       }
     }
 
@@ -1449,10 +1713,16 @@ if (!customElements.get('cover-media-card')) {
 
 window.customCards = window.customCards || [];
 window.customCards.push({
-  type:        'cover-media-card',
-  name:        'Cover Media Card',
-  description: 'A cover art media player card with auto-hiding controls and multi-player switching.',
-  preview:     true,
+  type:             'cover-media-card',
+  name:             'Cover Media Card',
+  description:      'A cover art media player card with auto-hiding controls and multi-player switching.',
+  preview:          true,
+  documentationURL: 'https://github.com/klaptafel/ha-cover-media-card',
+  version:          CARD_VERSION,
+  getEntitySuggestion: (hass, entityId) => {
+    if (!entityId.startsWith('media_player.')) return null;
+    return { config: { type: 'custom:cover-media-card', players: [entityId] } };
+  },
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1478,11 +1748,13 @@ class CoverMediaCardEditor extends HTMLElement {
     this._config         = null;
     this._hass           = null;
     this._built          = false;
-    this._ownFire        = false;
+    this._lastFiredConfig = null;
     this._tab            = 'players';
     this._playerExpanded = {};
     this._btnExpanded    = {};
   }
+
+  get _tr() { return TRANSLATIONS[this._hass?.language] || TRANSLATIONS.en; }
 
   set hass(hass) {
     this._hass = hass;
@@ -1496,9 +1768,16 @@ class CoverMediaCardEditor extends HTMLElement {
       return;
     }
     // When the change came from our own _fire(), HA calls back with the stripped
-    // config (no _disabled). Don't overwrite our internal state — it has the full
-    // editor representation including _disabled for correct drag-and-drop order.
-    if (this._ownFire) { this._ownFire = false; return; }
+    // config (no _disabled) -- possibly more than once per fire (confirmed: this
+    // was the actual cause of numeric fields losing focus after one keystroke,
+    // since a single-use `_ownFire` boolean only caught the *first* echo, letting
+    // a second one slip through and destructively rebuild the just-focused
+    // <ha-form>). Comparing directly against what we last actually dispatched
+    // catches every echo, regardless of how many arrive or their timing --
+    // don't overwrite our internal state (it has the full editor representation
+    // including _disabled for correct drag-and-drop order) or re-render for any
+    // of them.
+    if (this._lastFiredConfig && deepEqual(config, this._lastFiredConfig)) return;
     this._config = _normalizeConfig(config);
     this._renderTab();
   }
@@ -1508,12 +1787,6 @@ class CoverMediaCardEditor extends HTMLElement {
   // Saves config to HA. Does NOT re-render — use for text inputs to preserve focus.
   _fire(config) {
     this._config = config;
-    const DEFAULTS = {
-      show_duration: 10, auto_hide: true, show_on_change: true,
-      ratio_min: '16:9', ratio_max: '9:16',
-      art_style: 'fill',
-      volume_step: 2, auto_switch: 0,
-    };
     const cleanBtns = (btns) => (btns || []).filter(b => !b?._disabled);
     const clean = {
       ...config,
@@ -1525,21 +1798,17 @@ class CoverMediaCardEditor extends HTMLElement {
         return cleaned.length ? { ...rest, buttons: cleaned } : rest;
       }),
     };
-    for (const [k, v] of Object.entries(DEFAULTS)) {
-      if (clean[k] === v) delete clean[k];
-    }
     // Strip legacy aspect_ratio key
     delete clean.aspect_ratio;
+    const stripped = stripDefaults(clean);
     // Enforce key order: players → buttons → settings (mirrors the GUI tab order).
     const KEY_ORDER = ['players', 'buttons',
-      'ratio_min', 'ratio_max', 'art_style',
+      'ratio_min', 'ratio_max', 'art_style', 'art_edge_to_edge', 'art_padding', 'art_radius',
       'volume_step', 'auto_hide', 'show_duration', 'show_on_change', 'auto_switch'];
     const ordered = {};
-    for (const k of KEY_ORDER)          if (k in clean) ordered[k] = clean[k];
-    for (const k of Object.keys(clean)) if (!(k in ordered)) ordered[k] = clean[k];
-    this._ownFire = true;
-    // Fallback: clear flag if HA never calls setConfig back (e.g. on YAML errors).
-    setTimeout(() => { this._ownFire = false; }, 500);
+    for (const k of KEY_ORDER)             if (k in stripped) ordered[k] = stripped[k];
+    for (const k of Object.keys(stripped)) if (!(k in ordered)) ordered[k] = stripped[k];
+    this._lastFiredConfig = ordered;
     this.dispatchEvent(new CustomEvent('config-changed',
       { detail: { config: ordered }, bubbles: true, composed: true }));
   }
@@ -1699,10 +1968,7 @@ class CoverMediaCardEditor extends HTMLElement {
       .srow-text { flex: 1; }
       .srow-label { font-size: 14px; color: var(--primary-text-color); display: block; }
       .srow-desc  { font-size: 12px; color: var(--secondary-text-color); display: block; margin-top: 1px; }
-      .srow ha-input { width: 96px; }
       .radio-group { padding: 4px 2px 8px; border-bottom: 1px solid var(--divider-color); }
-      .radio-label { font-size: 14px; color: var(--primary-text-color); padding: 8px 0 4px; }
-      .radio-group ha-formfield { display: block; margin-left: -8px; }
 
       /* ── Aspect ratio picker ── */
       .aspect-picker { display: flex; gap: 16px; align-items: flex-start; margin-top: 8px; }
@@ -1737,7 +2003,8 @@ class CoverMediaCardEditor extends HTMLElement {
 
     const tabBar = document.createElement('div');
     tabBar.className = 'tab-bar';
-    [['players', 'Players'], ['buttons', 'Buttons'], ['settings', 'Settings']].forEach(([id, label]) => {
+    const tr = this._tr;
+    [['players', tr.tab_players], ['buttons', tr.tab_buttons], ['settings', tr.tab_settings]].forEach(([id, label]) => {
       const btn = Object.assign(document.createElement('button'), {
         className:   'tab-btn' + (id === this._tab ? ' active' : ''),
         textContent: label,
@@ -1850,7 +2117,10 @@ class CoverMediaCardEditor extends HTMLElement {
   }
 
   // label: visible text. description: optional helper text. disabled: greys out row.
-  _mkNumberRow(label, key, min, max, unit, defaultVal, description = null, { disabled = false, disabledReason = null } = {}) {
+  // Generic ha-form row for editor fields — HA-native rendering/validation
+  // via the selector object (number/select/text/...) instead of hand-built
+  // inputs. Same pattern as notify-dashboard-card.js's _mkFormRow.
+  _mkFormRow(label, selector, value, onChange, { description = null, disabled = false, disabledReason = null } = {}) {
     const row = document.createElement('div');
     row.className = 'srow' + (disabled ? ' srow-disabled' : '');
 
@@ -1863,61 +2133,68 @@ class CoverMediaCardEditor extends HTMLElement {
     }
     row.appendChild(textWrap);
 
-    const field = document.createElement('ha-input');
-    field.type = 'number';
-    field.setAttribute('min',        min);
-    field.setAttribute('max',        max);
-    field.setAttribute('suffix',     unit);
-    field.setAttribute('no-spinner', '');
-    field.value = this._config[key] ?? defaultVal;
-    if (disabled) {
-      field.setAttribute('disabled', '');
-    } else {
-      field.addEventListener('change', () => {
-        const raw = parseInt(field.value);
-        const v   = Math.min(max, Math.max(min, isNaN(raw) ? defaultVal : raw));
-        if (isNaN(raw) || raw < min || raw > max) {
-          field.setAttribute('error-message', `${min}–${max} ${unit}`);
-          field.setAttribute('invalid', '');
-          setTimeout(() => { field.removeAttribute('invalid'); field.removeAttribute('error-message'); }, 2000);
-        }
-        field.value = v;
-        this._fire({ ...this._config, [key]: v });
+    const form = document.createElement('ha-form');
+    form.schema = [{ name: 'v', selector }];
+    form.data = { v: value };
+    form.computeLabel = () => '';
+    form.disabled = disabled;
+    form.style.cssText = 'flex-shrink:0; width:120px;';
+    if (this._hass) form.hass = this._hass;
+    if (!disabled) {
+      form.addEventListener('value-changed', (e) => {
+        const val = e.detail.value?.v;
+        if (val !== undefined) onChange(val);
       });
     }
-    row.appendChild(field);
+    row.appendChild(form);
     return row;
   }
 
-  _mkRadioGroup(label, key, options, { rerender = false } = {}) {
+  // label: visible text. description: optional helper text. disabled: greys out row.
+  _mkNumberRow(label, key, min, max, unit, defaultVal, description = null, opts = {}) {
+    return this._mkFormRow(
+      label,
+      { number: { min, max, step: 1, mode: 'box', unit_of_measurement: unit } },
+      this._config[key] ?? defaultVal,
+      (val) => this._fire({ ...this._config, [key]: Number(val) || defaultVal }),
+      { description, ...opts },
+    );
+  }
+
+  // ha-form + a `select` selector in `mode: 'list'` renders as a radio-button
+  // list, same look as a hand-built <ha-radio-group>/<ha-radio-option> pair --
+  // but going through ha-form means those two underlying custom elements are
+  // guaranteed registered (ha-selector-select.ts imports them itself), which
+  // a raw, hand-constructed <ha-radio-group> is not: HA only actually loads
+  // that module when something renders a select-type ha-form field, so a
+  // custom card creating the tags directly can end up with unregistered,
+  // inert elements -- confirmed live (customElements.get('ha-radio-option')
+  // returning undefined) as the real cause of the picker sometimes/always
+  // rendering with visible text but no radio control at all.
+  _mkSelectRow(label, key, options, { rerender = false } = {}) {
     const wrap = document.createElement('div');
     wrap.className = 'radio-group';
-    wrap.appendChild(Object.assign(document.createElement('div'), { className: 'radio-label', textContent: label }));
-    const cur = this._config[key] ?? options[0].value;
-    options.forEach(({ value, label: optLabel }) => {
-      const ff    = document.createElement('ha-formfield');
-      ff.setAttribute('label', optLabel);
-      const radio = document.createElement('ha-radio');
-      radio.setAttribute('name',  key);
-      radio.setAttribute('value', value);
-      if (value === cur) radio.setAttribute('checked', '');
-      radio.addEventListener('change', () => {
-        if (!radio.checked) return;
-        wrap.querySelectorAll(`ha-radio[name="${key}"]`).forEach(r => {
-          if (r !== radio) r.removeAttribute('checked');
-        });
-        const cfg = { ...this._config, [key]: value };
-        rerender ? this._fireAndRender(cfg) : this._fire(cfg);
-      });
-      ff.appendChild(radio);
-      wrap.appendChild(ff);
+
+    const form = document.createElement('ha-form');
+    form.schema = [{ name: 'v', selector: { select: { mode: 'list', options } } }];
+    form.data = { v: this._config[key] ?? options[0].value };
+    form.computeLabel = () => label;
+    if (this._hass) form.hass = this._hass;
+    form.addEventListener('value-changed', (e) => {
+      const val = e.detail.value?.v;
+      if (val === undefined || val === this._config[key]) return;
+      const cfg = { ...this._config, [key]: val };
+      rerender ? this._fireAndRender(cfg) : this._fire(cfg);
     });
+
+    wrap.appendChild(form);
     return wrap;
   }
 
   // ── Aspect ratio picker ───────────────────────────────────────────────────
 
   _mkAspectPicker() {
+    const tr = this._tr;
     const RATIOS = [
       { value: '16:9' }, { value: '3:2' }, { value: '4:3' },
       { value: '5:4' }, { value: '1:1' }, { value: '4:5' },
@@ -1954,6 +2231,10 @@ class CoverMediaCardEditor extends HTMLElement {
     const dropdowns = document.createElement('div');
     dropdowns.className = 'aspect-dropdowns';
 
+    // Deliberately native <select> instead of ha-form's select selector: this
+    // dropdown pair is tightly coupled to the live rectangle preview above
+    // (outer/inner sizing reacts to the selected ratio), which ha-form's
+    // generic rendering doesn't support.
     const mkSelect = (labelText, key, filterFn) => {
       const selectWrap = document.createElement('div');
       selectWrap.className = 'aspect-select-wrap';
@@ -1982,8 +2263,8 @@ class CoverMediaCardEditor extends HTMLElement {
       return selectWrap;
     };
 
-    dropdowns.appendChild(mkSelect('Min', 'ratio_min', v => _ratioPct(v) <= maxPct));
-    dropdowns.appendChild(mkSelect('Max', 'ratio_max', v => _ratioPct(v) >= minPct));
+    dropdowns.appendChild(mkSelect(tr.aspect_min, 'ratio_min', v => _ratioPct(v) <= maxPct));
+    dropdowns.appendChild(mkSelect(tr.aspect_max, 'ratio_max', v => _ratioPct(v) >= minPct));
     row.appendChild(dropdowns);
     wrap.appendChild(row);
     return wrap;
@@ -2082,7 +2363,7 @@ class CoverMediaCardEditor extends HTMLElement {
       if (handle) {
         handle.setAttribute('tabindex', '0');
         handle.setAttribute('role', 'button');
-        handle.setAttribute('aria-label', 'Drag to reorder');
+        handle.setAttribute('aria-label', this._tr.drag_to_reorder);
         handle.addEventListener('keydown', (e) => {
           if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
           e.preventDefault();
@@ -2173,13 +2454,14 @@ class CoverMediaCardEditor extends HTMLElement {
 
   _renderPlayers() {
     const root    = this._content;
+    const tr      = this._tr;
     const players = this._config.players;
     const save    = (updated) => this._fireAndRender({ ...this._config, players: updated });
 
     if (!players.length) {
       root.appendChild(Object.assign(document.createElement('p'), {
         className:   'empty-state',
-        textContent: 'No players configured. Add one below to get started.',
+        textContent: tr.no_players_configured,
       }));
     }
 
@@ -2293,15 +2575,15 @@ class CoverMediaCardEditor extends HTMLElement {
 
       const groupMembersLabel = document.createElement('div');
       groupMembersLabel.className = 'body-label';
-      groupMembersLabel.textContent = 'Group members';
+      groupMembersLabel.textContent = tr.group_members;
       const groupMembersSub = Object.assign(document.createElement('div'), {
         className: 'body-label-sub',
-        textContent: 'Works best between speakers of the same brand',
+        textContent: tr.group_members_desc,
       });
 
       body.append(
-        mkLabel('Entity'),       entityForm,
-        mkLabel('Display name'), nameForm,
+        mkLabel(tr.entity),       entityForm,
+        mkLabel(tr.display_name), nameForm,
         groupMembersLabel, groupMembersSub, groupForm,
       );
 
@@ -2317,7 +2599,7 @@ class CoverMediaCardEditor extends HTMLElement {
     const addSection = document.createElement('div');
     addSection.className = 'add-section';
     addSection.appendChild(Object.assign(document.createElement('div'), {
-      className: 'add-label', textContent: 'Add player',
+      className: 'add-label', textContent: tr.add_player,
     }));
     const addForm = document.createElement('ha-form');
     addForm.schema = [{ name: 'entity', selector: { entity: {
@@ -2341,6 +2623,7 @@ class CoverMediaCardEditor extends HTMLElement {
 
   _renderButtons() {
     const root      = this._content;
+    const tr        = this._tr;
     const buttons   = this._config.buttons;
     const save      = (updated) => this._fireAndRender({ ...this._config, buttons: updated });
     const saveField = (updated) => this._fire({ ...this._config, buttons: updated });
@@ -2367,7 +2650,7 @@ class CoverMediaCardEditor extends HTMLElement {
         icon.setAttribute('icon', info.icon);
 
         const label = Object.assign(document.createElement('span'), {
-          className: 'row-label', textContent: info.label,
+          className: 'row-label', textContent: tr['row_' + key] ?? info.label,
         });
 
         const toggleWrap = document.createElement('div');
@@ -2399,7 +2682,7 @@ class CoverMediaCardEditor extends HTMLElement {
 
       const label = Object.assign(document.createElement('span'), {
         className:   'row-label',
-        textContent: isBuiltin ? info.label : (item.label || item.tap_action?.perform_action || 'Custom button'),
+        textContent: isBuiltin ? (tr['row_' + item] ?? info.label) : (item.label || item.tap_action?.perform_action || tr.custom_button_fallback),
       });
 
       row.append(this._mkDragHandle(), icon, label);
@@ -2449,11 +2732,11 @@ class CoverMediaCardEditor extends HTMLElement {
           { name: 'label', selector: { text: {} } },
         ];
         appearanceForm.data         = item;
-        appearanceForm.computeLabel = (s) => ({ icon: 'Icon', label: 'Label (tooltip)' }[s.name] ?? s.name);
+        appearanceForm.computeLabel = (s) => ({ icon: tr.field_icon, label: tr.field_label_tooltip }[s.name] ?? s.name);
         appearanceForm.addEventListener('value-changed', (e) => {
           const arr = [...buttons]; arr[arrIdx] = { ...arr[arrIdx], ...e.detail.value };
           icon.setAttribute('icon', arr[arrIdx].icon || 'mdi:gesture-tap-button');
-          label.textContent = arr[arrIdx].label || arr[arrIdx].tap_action?.perform_action || 'Custom button';
+          label.textContent = arr[arrIdx].label || arr[arrIdx].tap_action?.perform_action || tr.custom_button_fallback;
           saveField(arr);
         });
 
@@ -2464,13 +2747,13 @@ class CoverMediaCardEditor extends HTMLElement {
         actionForm.computeLabel = () => '';
         actionForm.addEventListener('value-changed', (e) => {
           const arr = [...buttons]; arr[arrIdx] = { ...arr[arrIdx], ...e.detail.value };
-          label.textContent = arr[arrIdx].label || arr[arrIdx].tap_action?.perform_action || 'Custom button';
+          label.textContent = arr[arrIdx].label || arr[arrIdx].tap_action?.perform_action || tr.custom_button_fallback;
           saveField(arr);
         });
 
         body.append(
-          mkLabel('Button'), appearanceForm,
-          mkLabel('Action'), actionForm,
+          mkLabel(tr.button_header), appearanceForm,
+          mkLabel(tr.action_header), actionForm,
         );
 
         // Hint when no action has been configured yet
@@ -2480,7 +2763,7 @@ class CoverMediaCardEditor extends HTMLElement {
           const hIco = document.createElement('ha-icon');
           hIco.setAttribute('icon', 'mdi:information-outline');
           hint.append(hIco, Object.assign(document.createElement('span'), {
-            textContent: 'Choose an action above to make this button do something.',
+            textContent: tr.choose_action_hint,
           }));
           body.appendChild(hint);
         }
@@ -2500,9 +2783,9 @@ class CoverMediaCardEditor extends HTMLElement {
     const addSection = document.createElement('div');
     addSection.className = 'add-section';
     const addBtn = document.createElement('ha-button');
-    addBtn.textContent = 'Add custom button';
+    addBtn.textContent = tr.add_custom_button;
     addBtn.addEventListener('click', () => {
-      const updated = [...buttons, { icon: 'mdi:information-outline', label: 'More info', tap_action: { action: 'more-info' } }];
+      const updated = [...buttons, { icon: 'mdi:information-outline', label: tr.default_custom_button_label, tap_action: { action: 'more-info' } }];
       this._btnExpanded[updated.length - 1] = true;
       save(updated);
     });
@@ -2514,6 +2797,7 @@ class CoverMediaCardEditor extends HTMLElement {
 
   _renderSettings() {
     const root     = this._content;
+    const tr       = this._tr;
     const autoHide = this._config.auto_hide ?? true;
     const autoSw   = (this._config.auto_switch ?? 0) > 0;
     const multi    = this._config.players.length > 1;
@@ -2523,54 +2807,67 @@ class CoverMediaCardEditor extends HTMLElement {
     });
 
     // ── Aspect ratio ──
-    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: 'Aspect ratio' }));
+    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: tr.section_aspect_ratio }));
     root.appendChild(this._mkAspectPicker());
 
     // ── Art ──
     const artStyle = this._config.art_style ?? 'fill';
-    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: 'Art' }));
+    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: tr.section_art }));
     const artGroup = document.createElement('div');
     artGroup.className = 'settings-group';
-    artGroup.appendChild(this._mkRadioGroup('Style', 'art_style', [
-      { value: 'fill', label: 'Fill — cover art crops to fill the card' },
-      { value: 'fit',  label: 'Fit — cover art fully visible, no cropping' },
+    artGroup.appendChild(this._mkSelectRow(tr.style, 'art_style', [
+      { value: 'fill', label: tr.art_fill },
+      { value: 'fit',  label: tr.art_fit },
     ], { rerender: true }));
+    if (artStyle === 'fit') {
+      artGroup.appendChild(this._mkToggleRow(tr.edge_to_edge, 'art_edge_to_edge', {
+        defaultVal: true,
+        rerender:   true,
+      }));
+      const noEdge = !(this._config.art_edge_to_edge ?? true);
+      if (noEdge) {
+        artGroup.appendChild(this._mkNumberRow(
+          tr.padding, 'art_padding', 0, 30, '%', 8,
+          null
+        ));
+      }
+    }
 
     root.appendChild(artGroup);
 
     // ── General ──
-    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: 'General' }));
+    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: tr.section_general }));
     const generalGroup = document.createElement('div');
     generalGroup.className = 'settings-group';
     generalGroup.appendChild(this._mkNumberRow(
-      'Volume step', 'volume_step', 1, 50, '%', 2,
-      'How much the volume changes per button press',
-      { disabled: !hasVol, disabledReason: 'Add a volume up or down button to use this' }
+      tr.volume_step, 'volume_step', 1, 50, '%', 2,
+      tr.volume_step_desc,
+      { disabled: !hasVol, disabledReason: tr.volume_step_disabled }
     ));
     root.appendChild(generalGroup);
 
     // ── Overlay ──
-    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: 'Overlay' }));
+    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: tr.section_overlay }));
     const overlayGroup = document.createElement('div');
     overlayGroup.className = 'settings-group';
-    overlayGroup.appendChild(this._mkToggleRow('Auto-hide', 'auto_hide', {
+    overlayGroup.appendChild(this._mkToggleRow(tr.auto_hide, 'auto_hide', {
       rerender:    true,
-      description: 'Hide the controls after a few seconds during playback',
+      description: tr.auto_hide_desc,
     }));
     overlayGroup.appendChild(this._mkNumberRow(
-      'Show duration', 'show_duration', 1, 60, 's', 10,
-      'How long the controls stay visible before hiding',
-      { disabled: !autoHide, disabledReason: 'Only applies when auto-hide is on' }
+      tr.show_duration, 'show_duration', 1, 60, 's', 10,
+      tr.show_duration_desc,
+      { disabled: !autoHide, disabledReason: tr.overlay_disabled_reason }
     ));
-    overlayGroup.appendChild(this._mkToggleRow('Show on change', 'show_on_change', {
-      description:    'Briefly re-show the controls when the media changes',
+    overlayGroup.appendChild(this._mkToggleRow(tr.show_on_change, 'show_on_change', {
+      description:    tr.show_on_change_desc,
       disabled:       !autoHide,
-      disabledReason: 'Only applies when auto-hide is on',
+      disabledReason: tr.overlay_disabled_reason,
     }));
     root.appendChild(overlayGroup);
 
     // ── Player switching ──
-    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: 'Player switching' }));
+    root.appendChild(Object.assign(document.createElement('div'), { className: 'section-label', textContent: tr.section_player_switching }));
     const switchGroup = document.createElement('div');
     switchGroup.className = 'settings-group';
 
@@ -2578,10 +2875,10 @@ class CoverMediaCardEditor extends HTMLElement {
     autoSwRow.className = 'srow' + (!multi ? ' srow-disabled' : '');
     const autoSwText = document.createElement('div');
     autoSwText.className = 'srow-text';
-    autoSwText.appendChild(Object.assign(document.createElement('span'), { className: 'srow-label', textContent: 'Auto switch' }));
+    autoSwText.appendChild(Object.assign(document.createElement('span'), { className: 'srow-label', textContent: tr.auto_switch }));
     autoSwText.appendChild(Object.assign(document.createElement('span'), { className: 'srow-desc', textContent:
-      multi ? 'Switches to another player when it starts playing and this one is idle'
-            : 'Add more than one player to use this',
+      multi ? tr.auto_switch_desc
+            : tr.multi_required,
     }));
     autoSwRow.appendChild(autoSwText);
     const autoSwToggle = document.createElement('ha-switch');
@@ -2597,9 +2894,9 @@ class CoverMediaCardEditor extends HTMLElement {
     switchGroup.appendChild(autoSwRow);
 
     switchGroup.appendChild(this._mkNumberRow(
-      'Delay', 'auto_switch', 1, 300, 's', 30,
-      'Wait this long before switching, in case the current player resumes',
-      { disabled: !multi || !autoSw, disabledReason: !multi ? 'Add more than one player to use this' : 'Enable auto switch to use this' }
+      tr.delay, 'auto_switch', 1, 300, 's', 30,
+      tr.delay_desc,
+      { disabled: !multi || !autoSw, disabledReason: !multi ? tr.multi_required : tr.enable_auto_switch }
     ));
     root.appendChild(switchGroup);
   }

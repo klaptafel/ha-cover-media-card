@@ -1,7 +1,7 @@
 [![Made for Home Assistant](https://img.shields.io/badge/Made%20for-Home%20Assistant-blue?style=for-the-badge&logo=homeassistant)](https://www.home-assistant.io/)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge)](https://github.com/hacs/integration)
 
-# Cover Media Card
+# Cover Media Card: Home Assistant media player card
 
 > [!NOTE]
 > This card is vibe coded
@@ -14,16 +14,16 @@ A Home Assistant Lovelace card that turns your media players into a full-bleed c
 
 ## Features
 
-- **Cover art background** — artwork fills the entire card. Choose `fill` (default, crops to fit) or `fit` (fully visible with blurred background). Aspect ratio follows the cover art, clamped to configurable min/max bounds.
-- **App logo fallback** — when no cover art is available, the card shows an app logo (e.g. Netflix, Youtube) if the player reports an `app_name`.
-- **Auto-hiding overlay** — track title, artist, and controls fade out after a configurable timeout. Tap to show them, or they reappear automatically on track change.
-- **Multi-player tabs** — configure multiple media players and switch between them with a tap.
-- **Visual editor** — players, buttons, and settings are all configurable without YAML. Buttons and players can be reordered by drag-and-drop.
+- **Cover art background**: artwork fills the entire card. Choose `fill` (default, crops to fit) or `fit` (fully visible with blurred background). Aspect ratio follows the cover art, clamped to configurable min/max bounds.
+- **App logo fallback**: when no cover art is available, the card shows an app logo (e.g. Netflix, Youtube) if the player reports an `app_name`.
+- **Auto-hiding overlay**: track title, artist, and controls fade out after a configurable timeout. Tap to show them, or they reappear automatically on track change.
+- **Multi-player tabs**: configure multiple media players and switch between them with a tap.
+- **Visual editor**: players, buttons, and settings are all configurable without YAML. Buttons and players can be reordered by drag-and-drop.
 
 With YAML you can also configure:
 
-- **Per-player buttons** — use a different button set for each player.
-- **Conditional visibility** — show or hide any button or player tab based on entity state.
+- **Per-player buttons**: use a different button set for each player.
+- **Conditional visibility**: show or hide any button or player tab based on entity state.
 
 ---
 
@@ -39,7 +39,7 @@ With YAML you can also configure:
 
 ## Configuration
 
-The visual editor covers the most common setup: adding players, selecting buttons, and adjusting overlay behavior. Advanced options — per-player buttons and conditional visibility — require YAML.
+The visual editor covers the most common setup: adding players, selecting buttons, and adjusting overlay behavior. Advanced options (per-player buttons and conditional visibility) require YAML.
 
 ### Minimal
 
@@ -116,7 +116,7 @@ players:
 
 ### Visibility
 
-Show or hide buttons or player tabs based on any entity state. Visibility accepts a list of conditions — all must be true.
+Show or hide buttons or player tabs based on any entity state. Visibility accepts a list of conditions: all must be true.
 
 **Show a player tab only when a switch is on:**
 
@@ -165,8 +165,8 @@ Available condition types:
 | `state` | `entity`, `state` or `state_not` (single value or list) |
 | `numeric_state` | `entity`, `above`, `below`, optional `attribute` |
 | `attribute` | `entity`, `attribute`, `value` |
-| `and` | `conditions: [...]` — all must be true |
-| `or` | `conditions: [...]` — at least one must be true |
+| `and` | `conditions: [...]`; all must be true |
+| `or` | `conditions: [...]`; at least one must be true |
 
 Time-based conditions are not supported. Use a [template binary sensor](https://www.home-assistant.io/integrations/template/) to expose time-based logic as an entity state.
 
@@ -186,7 +186,7 @@ card_mod:
 
 ## App logos
 
-When a media player has no cover art but reports an `app_name`, the card automatically shows a logo from the [`apps/`](https://github.com/klaptafel/ha-cover-media-card/tree/main/apps) folder. The app name is slugified — lowercased with non-alphanumeric characters removed — to determine the filename:
+When a media player has no cover art but reports an `app_name`, the card automatically shows a logo from the [`apps/`](https://github.com/klaptafel/ha-cover-media-card/tree/main/apps) folder. The app name is slugified (lowercased with non-alphanumeric characters removed) to determine the filename:
 
 | App name | File |
 |---|---|
