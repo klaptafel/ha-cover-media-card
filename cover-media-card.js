@@ -1,5 +1,5 @@
 /**
- * Cover Media Card — Home Assistant Lovelace card
+ * Cover Media Card: Home Assistant Lovelace card
  *
  * Minimal config:
  *   type: custom:cover-media-card
@@ -57,7 +57,7 @@
  *                                  # set to false for padding, radius and shadow around art
  *   art_padding: 8                 # fit + edge_to_edge:false: padding in % (default: 8)
  *   art_radius: 12                 # fit + edge_to_edge:false: border radius in px
- *                                  # default: auto — ha-card radius + padding * 0.15, max 64px
+ *                                  # default: auto (ha-card radius + padding * 0.15, max 64px)
  *   auto_hide: true                # default: true
  *   show_duration: 10              # seconds (default: 10)
  *   show_on_change: true           # default: true
@@ -66,7 +66,7 @@
  *
  * ─── Visibility conditions ───────────────────────────────────────────────────
  *
- * Supported on both players (pill) and buttons. Evaluated locally — no HA API
+ * Supported on both players (pill) and buttons. Evaluated locally: no HA API
  * calls, no polling. Reacts instantly to state changes.
  *
  * Multiple conditions = all must be true (implicit AND):
@@ -81,8 +81,8 @@
  * state          entity, state (single or list), or state_not
  * numeric_state  entity, above / below, optional: attribute
  * attribute      entity, attribute, value
- * and            conditions: [...]  — all must be true
- * or             conditions: [...]  — at least one must be true
+ * and            conditions: [...]  (all must be true)
+ * or             conditions: [...]  (at least one must be true)
  *
  * Note: time-based conditions are not supported. Use a template binary_sensor
  * in HA for time-based visibility.
@@ -238,7 +238,7 @@ const LIVE_TYPES = new Set(['radio', 'channel', 'url']);
 
 const mkIcon = (mdi) => `<ha-icon icon="${mdi}"></ha-icon>`;
 // Prefers HA's own registry-aware name composition (device+entity name,
-// area overrides, etc. — same logic HA core itself uses) when available;
+// area overrides, etc., same logic HA core itself uses) when available;
 // falls back to a plain friendly_name/humanized-entity_id lookup for older
 // HA versions that don't have formatEntityName yet, or when the entity
 // doesn't exist in hass.states at all (formatEntityName requires a real
@@ -326,7 +326,7 @@ function _normalizeButtons(buttons) {
   return buttons;
 }
 
-// Single source of truth — shared by CoverMediaCard.setConfig and the editor.
+// Single source of truth, shared by CoverMediaCard.setConfig and the editor.
 const CARD_DEFAULTS = {
   show_duration: 10, auto_hide: true, show_on_change: true,
   ratio_min: '16:9', ratio_max: '9:16',
@@ -346,7 +346,7 @@ function deepEqual(a, b) {
 }
 
 // Only keep keys that differ from CARD_DEFAULTS (or have no default at all,
-// e.g. `players`/`buttons`) — _normalizeConfig merges every default into
+// e.g. `players`/`buttons`): _normalizeConfig merges every default into
 // _config for internal rendering, but firing that whole merged object back
 // would persist every untouched default into the saved YAML.
 function stripDefaults(config) {
@@ -392,6 +392,29 @@ function _normalizeConfig(config) {
   };
 }
 
+// Entities referenced in any visibility condition (player-level, button
+// overrides, top-level buttons), plus player entities themselves when
+// auto_switch is on. Only depends on config, so this is computed once in
+// setConfig rather than walked again on every hass tick.
+function _collectWatchedEntities(config) {
+  const entities = [];
+  const addEntities = (conds) => {
+    if (!conds) return;
+    const arr = Array.isArray(conds) ? conds : [conds];
+    arr.forEach(c => {
+      if (c?.entity) entities.push(c.entity);
+      if (c?.conditions) addEntities(c.conditions);
+    });
+  };
+  config.players?.forEach(p => {
+    addEntities(p.visibility);
+    if (p.buttons) p.buttons.forEach(b => addEntities(b?.visibility));
+    if (config.auto_switch > 0) entities.push(p.entity);
+  });
+  config.buttons?.forEach(b => addEntities(b?.visibility));
+  return entities;
+}
+
 class CoverMediaCard extends HTMLElement {
   constructor() {
     super();
@@ -435,6 +458,8 @@ class CoverMediaCard extends HTMLElement {
     this._trackAnim          = null;
     this._lastArtStyle       = null;
     this._lastBlurVisible    = null;
+    this._watchedEntities    = [];
+    this._activeButtonsCache = null;
   }
 
   // ── Config ──────────────────────────────────────────────────────────────────
@@ -442,29 +467,16 @@ class CoverMediaCard extends HTMLElement {
   setConfig(config) {
     this._config    = _normalizeConfig(config);
     this._playerIdx = Math.min(this._playerIdx, Math.max(0, this._config.players.length - 1));
+    this._watchedEntities = _collectWatchedEntities(this._config);
     this._render();
   }
 
   set hass(hass) {
     this._hass = hass;
+    this._activeButtonsCache = null;
     const s    = hass?.states[this._player];
     let stKey = `${s?.state}|${s?.attributes?.media_title}|${s?.attributes?.media_artist}|${s?.attributes?.app_name}|${s?.attributes?.media_content_type}|${s?.attributes?.entity_picture}`;
-    // Watch all entities referenced in any visibility condition
-    const _addEntities = (conds) => {
-      if (!conds) return;
-      const arr = Array.isArray(conds) ? conds : [conds];
-      arr.forEach(c => {
-        if (c?.entity) stKey += `|${c.entity}:${hass?.states[c.entity]?.state}`;
-        if (c?.conditions) _addEntities(c.conditions);
-      });
-    };
-    // Player-level visibility conditions + button overrides + auto_switch state tracking
-    this._config.players?.forEach(p => {
-      _addEntities(p.visibility);
-      if (p.buttons) p.buttons.forEach(b => _addEntities(b?.visibility));
-      if (this._config.auto_switch > 0) stKey += `|${p.entity}:${hass?.states[p.entity]?.state}`;
-    });
-    this._config.buttons?.forEach(b => _addEntities(b?.visibility));
+    for (const entity of this._watchedEntities) stKey += `|${entity}:${hass?.states[entity]?.state}`;
     if (stKey !== this._lastState) {
       this._lastState = stKey;
       this._evalVisible();
@@ -480,7 +492,7 @@ class CoverMediaCard extends HTMLElement {
   }
 
   getGridOptions() {
-    // Full-width, auto height — same as package-tracker-card, on request.
+    // Full-width, auto height, same as package-tracker-card, on request.
     return { columns: 'full', rows: 'auto' };
   }
 
@@ -559,7 +571,7 @@ class CoverMediaCard extends HTMLElement {
     const st = this._state?.state;
     const { mainControls } = this._el;
     if (btnChanged && mainControls)
-      mainControls.innerHTML = this._activeButtons().map(b => this._btnHtml(b, st)).join('');
+      mainControls.innerHTML = this._activeButtonsMemo().map(b => this._btnHtml(b, st)).join('');
     if (pillChanged) this._updatePills();
   }
 
@@ -606,16 +618,23 @@ class CoverMediaCard extends HTMLElement {
     }
   }
 
-  _showCtrl() {
-    this._ctrlVis = true;
+  _showOverlayEls() {
     this._el?.overlayBg?.classList.add('visible');
     this._el?.overlay?.classList.add('visible');
+  }
+  _hideOverlayEls() {
+    this._el?.overlayBg?.classList.remove('visible');
+    this._el?.overlay?.classList.remove('visible');
+  }
+
+  _showCtrl() {
+    this._ctrlVis = true;
+    this._showOverlayEls();
     if (this._config.auto_hide !== false) this._scheduleHide();
   }
   _hideCtrl() {
     this._ctrlVis = false;
-    this._el?.overlayBg?.classList.remove('visible');
-    this._el?.overlay?.classList.remove('visible');
+    this._hideOverlayEls();
     clearTimeout(this._hideTimer);
     this._hideTimer = null;
   }
@@ -628,7 +647,7 @@ class CoverMediaCard extends HTMLElement {
   _toggleCtrl() {
     const isActive = this._state?.state === 'playing';
     if (!isActive) {
-      // Overlay stays visible — pulse track info as feedback
+      // Overlay stays visible; pulse track info as feedback
       const ca = this._el?.centerArea;
       if (ca) {
         ca.classList.remove('pulse');
@@ -652,7 +671,7 @@ class CoverMediaCard extends HTMLElement {
   _autoSwitch() {
     const currentPlaying = this._state?.state === 'playing';
 
-    // Current player is playing — cancel everything, release cooldown
+    // Current player is playing; cancel everything, release cooldown
     if (currentPlaying) {
       clearTimeout(this._autoSwitchTimer);
       this._autoSwitchTimer    = null;
@@ -660,27 +679,27 @@ class CoverMediaCard extends HTMLElement {
       return;
     }
 
-    // Manual switch cooldown active — do nothing
+    // Manual switch cooldown active; do nothing
     if (this._autoSwitchCooldown) return;
 
     // Find first visible playing player that isn't current
     const playingIdx = this._findPlayingPlayer();
 
-    // No playing player found — cancel pending switch
+    // No playing player found; cancel pending switch
     if (playingIdx === -1) {
       clearTimeout(this._autoSwitchTimer);
       this._autoSwitchTimer = null;
       return;
     }
 
-    // Initial load — switch immediately without delay
+    // Initial load; switch immediately without delay
     if (this._initialLoad) {
       this._initialLoad = false;
       this._switchPlayer(playingIdx);
       return;
     }
 
-    // Timer already running — let it finish
+    // Timer already running; let it finish
     if (this._autoSwitchTimer !== null) return;
 
     // Start delay timer
@@ -790,7 +809,7 @@ class CoverMediaCard extends HTMLElement {
         const classes     = ['player-pill', active && 'active', unavailable && 'unavailable'].filter(Boolean).join(' ');
         const icon        = unavailable ? 'mdi:help-circle-outline' : this._playerIcon(i);
 
-        // Only show extra member label on solo pills — cluster already shows grouping visually
+        // Only show extra member label on solo pills; cluster already shows grouping visually
         let pillLabel = this._playerName(i);
         if (ci === 0 && cluster.length === 1) {
           const haMembers = state?.attributes?.group_members ?? [];
@@ -883,10 +902,9 @@ class CoverMediaCard extends HTMLElement {
     if (this._showVol && priority < this._statusPriority) return;
     this._showVol        = true;
     this._statusPriority = priority;
-    // Show overlay without restarting auto-hide timer — that restarts after flash ends
+    // Show overlay without restarting auto-hide timer; that restarts after flash ends
     this._ctrlVis = true;
-    this._el?.overlayBg?.classList.add('visible');
-    this._el?.overlay?.classList.add('visible');
+    this._showOverlayEls();
     if (this._el?.trackTitle) this._el.trackTitle.textContent = title;
     if (this._el?.trackArtist) {
       this._el.trackArtist.textContent = sub;
@@ -945,7 +963,7 @@ class CoverMediaCard extends HTMLElement {
     if (!members.length && !this._grouped) return;
     const grouped = this._grouped;
 
-    // Build a readable list — use configured name if available, else friendly_name
+    // Build a readable list; use configured name if available, else friendly_name
     const allEntities = grouped
       ? (this._attr('group_members') ?? [])
       : [this._player, ...members];
@@ -985,6 +1003,14 @@ class CoverMediaCard extends HTMLElement {
 
   // ── Active buttons ──────────────────────────────────────────────────────────
 
+  // _evalVisible() and _updateCard() can each decide to rebuild the button
+  // row within the same hass tick; memoize so that only computes _activeButtons()
+  // once per tick instead of twice. Cache is cleared at the top of set hass().
+  _activeButtonsMemo() {
+    if (!this._activeButtonsCache) this._activeButtonsCache = this._activeButtons();
+    return this._activeButtonsCache;
+  }
+
   _activeButtons() {
     const st          = this._state?.state;
     const isOff       = st === 'off';
@@ -1006,11 +1032,11 @@ class CoverMediaCard extends HTMLElement {
         if (key === 'group') {
           const alreadyGrouped = this._grouped;
           if (!player?.group_members?.length && !alreadyGrouped) return;
-          // Skip feature check when group_members is configured — the F.GROUPING bit
+          // Skip feature check when group_members is configured; the F.GROUPING bit
           // is unreliable for some integrations (e.g. apple_tv / AirPlay).
           if (def.feature && (supported & def.feature) === 0 && !player?.group_members?.length) return;
         } else {
-          // Hide shuffle and repeat for live/linear streams — feature bit may say
+          // Hide shuffle and repeat for live/linear streams; feature bit may say
           // supported but the operation is meaningless on radio/channel/url content.
           if (isLive && (key === 'shuffle' || key === 'repeat')) return;
           if (def.feature && (supported & def.feature) === 0) return;
@@ -1043,7 +1069,6 @@ class CoverMediaCard extends HTMLElement {
   // ── Render ──────────────────────────────────────────────────────────────────
 
   _render() {
-    this._rendered        = true;
     this._ctrlVis         = false;
     this._lastFeats       = null;
     this._lastIsOff       = null;
@@ -1104,7 +1129,7 @@ class CoverMediaCard extends HTMLElement {
           font-family: var(--ha-font-family-body, inherit);
           -webkit-font-smoothing: var(--ha-font-smoothing, antialiased);
         }
-        /* Aspect ratio wrapper — height driven by padding-bottom trick */
+        /* Aspect ratio wrapper: height driven by padding-bottom trick */
         .card-aspect {
           position: relative; width: 100%; padding-bottom: 100%;
           transition: padding-bottom .4s ease;
@@ -1264,7 +1289,7 @@ class CoverMediaCard extends HTMLElement {
 
               <div class="controls-wrap">
                 <div class="controls-row" id="mainControls">
-                  ${this._activeButtons().map(b => this._btnHtml(b, st)).join('')}
+                  ${this._activeButtonsMemo().map(b => this._btnHtml(b, st)).join('')}
                 </div>
               </div>
             </div>
@@ -1356,6 +1381,13 @@ class CoverMediaCard extends HTMLElement {
       artPlaceholder:     this.shadowRoot.querySelector('#artPlaceholder'),
       artPlaceholderIcon: this.shadowRoot.querySelector('#artPlaceholderIcon'),
     };
+    // Only now, not at the top of _render(): _evalVisible()/_updateCard()
+    // (called from later hass updates) destructure this._el without a
+    // guard, unlike _applyFitPadding(). If _rendered were true before
+    // this point and something upstream threw partway through _render(),
+    // every later hass update would hit that unguarded destructure and
+    // crash-loop instead of retrying a full _render().
+    this._rendered = true;
     this._applyDefaultRatio();
 
     // Recalculate fit sizing whenever the card is resized (e.g. in popups).
@@ -1370,6 +1402,18 @@ class CoverMediaCard extends HTMLElement {
     }
   }
 
+  // Shared by _applyAspectRatio/_applyDefaultRatio: sets the padding-bottom
+  // that drives the card's aspect ratio, and fires card-size-changed only
+  // when the effective percentage actually moved (so Lovelace's masonry
+  // layout isn't asked to re-measure on every render).
+  _setAspectPct(aspect, pct) {
+    aspect.style.paddingBottom = `${pct.toFixed(2)}%`;
+    if (pct !== this._lastAspectPct) {
+      this._lastAspectPct = pct;
+      this.dispatchEvent(new Event('card-size-changed', { bubbles: true, composed: true }));
+    }
+  }
+
   _applyAspectRatio(img, aspect) {
     const { naturalWidth: w, naturalHeight: h } = img;
     if (!w || !h) return;
@@ -1377,11 +1421,7 @@ class CoverMediaCard extends HTMLElement {
     const minPct = _ratioPct(this._config.ratio_min);
     const maxPct = _ratioPct(this._config.ratio_max);
     const pct    = Math.min(maxPct, Math.max(minPct, rawPct));
-    aspect.style.paddingBottom = `${pct.toFixed(2)}%`;
-    if (pct !== this._lastAspectPct) {
-      this._lastAspectPct = pct;
-      this.dispatchEvent(new Event('card-size-changed', { bubbles: true, composed: true }));
-    }
+    this._setAspectPct(aspect, pct);
   }
 
   _applyDefaultRatio() {
@@ -1390,11 +1430,7 @@ class CoverMediaCard extends HTMLElement {
     const minPct = _ratioPct(this._config.ratio_min);
     const maxPct = _ratioPct(this._config.ratio_max);
     const pct    = Math.min(maxPct, Math.max(minPct, 100));
-    aspect.style.paddingBottom = `${pct.toFixed(2)}%`;
-    if (pct !== this._lastAspectPct) {
-      this._lastAspectPct = pct;
-      this.dispatchEvent(new Event('card-size-changed', { bubbles: true, composed: true }));
-    }
+    this._setAspectPct(aspect, pct);
   }
 
   /**
@@ -1482,7 +1518,7 @@ class CoverMediaCard extends HTMLElement {
       ? st.charAt(0).toUpperCase() + st.slice(1) : '';
 
     // title + artist → title / artist
-    // artist only   → artist / —
+    // artist only   → artist / (none)
     // no media      → player name / state label
     const display = title || artist || this._playerName(this._playerIdx);
     const sub     = title ? artist : (artist ? '' : stateLabel);
@@ -1533,7 +1569,7 @@ class CoverMediaCard extends HTMLElement {
     const hasError = !!title;
     this._configError = hasError;
 
-    // Reuse the normal overlay title/artist elements — same styling, same position
+    // Reuse the normal overlay title/artist elements; same styling, same position
     if (hasError && !this._showVol) {
       if (this._el?.trackTitle)  this._el.trackTitle.textContent  = title;
       if (this._el?.trackArtist) {
@@ -1541,8 +1577,7 @@ class CoverMediaCard extends HTMLElement {
         this._el.trackArtist.style.display = sub ? '' : 'none';
       }
       // Show overlay without starting auto-hide
-      this._el?.overlayBg?.classList.add('visible');
-      this._el?.overlay?.classList.add('visible');
+      this._showOverlayEls();
     }
 
     // Keep placeholder icon visible; hide art
@@ -1556,13 +1591,13 @@ class CoverMediaCard extends HTMLElement {
 
     const st       = this._state?.state;
     const isActive = st === 'playing';
-    // Ignore stale entity_picture when unavailable — HA keeps old value after disconnect
+    // Ignore stale entity_picture when unavailable; HA keeps old value after disconnect
     const artUrl   = (st === 'unavailable' || st === 'unknown' || !st) ? null :
       this._attr('entity_picture') || _appLogoUrl(this._attr('app_name'));
     const title    = this._attr('media_title') || '';
 
     // ── Art ───────────────────────────────────────────────
-    const { artImg, artBlur, cardAspect, overlayBg, overlay, mainControls, artPlaceholder, artPlaceholderIcon } = this._el;
+    const { artImg, artBlur, cardAspect, mainControls, artPlaceholder, artPlaceholderIcon } = this._el;
     const artStyle = this._config.art_style ?? 'fill';
     const showBlur = artStyle === 'fit';
 
@@ -1643,7 +1678,7 @@ class CoverMediaCard extends HTMLElement {
       this._lastIsUnavail   = isUnavail;
       this._lastGrouped     = grouped;
       this._lastContentType = contentType;
-      if (mainControls) mainControls.innerHTML = this._activeButtons().map(b => this._btnHtml(b, st)).join('');
+      if (mainControls) mainControls.innerHTML = this._activeButtonsMemo().map(b => this._btnHtml(b, st)).join('');
     }
 
     // ── Update button icons + toggle states ─────────────────
@@ -1665,7 +1700,7 @@ class CoverMediaCard extends HTMLElement {
         } else if (key === 'play_pause') {
           btn.innerHTML = def.icon(st);
         }
-        // previous, next, power, volume_up/down icons never change — skip
+        // previous, next, power, volume_up/down icons never change; skip
       });
     }
 
@@ -1676,13 +1711,9 @@ class CoverMediaCard extends HTMLElement {
         this._ctrlVis = true;
         if (this._firstShow) {
           this._firstShow = false;
-          requestAnimationFrame(() => {
-            overlayBg?.classList.add('visible');
-            overlay?.classList.add('visible');
-          });
+          requestAnimationFrame(() => this._showOverlayEls());
         } else {
-          overlayBg?.classList.add('visible');
-          overlay?.classList.add('visible');
+          this._showOverlayEls();
         }
       }
     } else if (!this._lastActive) {
@@ -1712,18 +1743,23 @@ if (!customElements.get('cover-media-card')) {
 }
 
 window.customCards = window.customCards || [];
-window.customCards.push({
-  type:             'cover-media-card',
-  name:             'Cover Media Card',
-  description:      'A cover art media player card with auto-hiding controls and multi-player switching.',
-  preview:          true,
-  documentationURL: 'https://github.com/klaptafel/ha-cover-media-card',
-  version:          CARD_VERSION,
-  getEntitySuggestion: (hass, entityId) => {
-    if (!entityId.startsWith('media_player.')) return null;
-    return { config: { type: 'custom:cover-media-card', players: [entityId] } };
-  },
-});
+// Guarded like customElements.define above: a duplicate module load (HA
+// resource cache-bust, dashboard resource re-added) would otherwise list
+// this card twice in the card picker.
+if (!window.customCards.some((c) => c.type === 'cover-media-card')) {
+  window.customCards.push({
+    type:             'cover-media-card',
+    name:             'Cover Media Card',
+    description:      'A cover art media player card with auto-hiding controls and multi-player switching.',
+    preview:          true,
+    documentationURL: 'https://github.com/klaptafel/ha-cover-media-card',
+    version:          CARD_VERSION,
+    getEntitySuggestion: (hass, entityId) => {
+      if (!entityId.startsWith('media_player.')) return null;
+      return { config: { type: 'custom:cover-media-card', players: [entityId] } };
+    },
+  });
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Editor
@@ -1784,7 +1820,7 @@ class CoverMediaCardEditor extends HTMLElement {
 
   // ── Config output ──────────────────────────────────────────────────────────
 
-  // Saves config to HA. Does NOT re-render — use for text inputs to preserve focus.
+  // Saves config to HA. Does NOT re-render; use for text inputs to preserve focus.
   _fire(config) {
     this._config = config;
     const cleanBtns = (btns) => (btns || []).filter(b => !b?._disabled);
@@ -2117,7 +2153,7 @@ class CoverMediaCardEditor extends HTMLElement {
   }
 
   // label: visible text. description: optional helper text. disabled: greys out row.
-  // Generic ha-form row for editor fields — HA-native rendering/validation
+  // Generic ha-form row for editor fields; HA-native rendering/validation
   // via the selector object (number/select/text/...) instead of hand-built
   // inputs. Same pattern as notify-dashboard-card.js's _mkFormRow.
   _mkFormRow(label, selector, value, onChange, { description = null, disabled = false, disabledReason = null } = {}) {
@@ -2156,7 +2192,10 @@ class CoverMediaCardEditor extends HTMLElement {
       label,
       { number: { min, max, step: 1, mode: 'box', unit_of_measurement: unit } },
       this._config[key] ?? defaultVal,
-      (val) => this._fire({ ...this._config, [key]: Number(val) || defaultVal }),
+      // val !== '' (not Number(val) || defaultVal): a legitimately-entered
+      // 0 is falsy and would otherwise get silently replaced by the
+      // default -- this bit art_padding specifically, whose min is 0.
+      (val) => this._fire({ ...this._config, [key]: val !== '' ? Number(val) : defaultVal }),
       { description, ...opts },
     );
   }
@@ -2404,7 +2443,7 @@ class CoverMediaCardEditor extends HTMLElement {
       if (!handle) return;
 
       handle.addEventListener('touchstart', (e) => {
-        // Don't steal scroll — only activate on the handle itself
+        // Don't steal scroll; only activate on the handle itself
         const touch = e.touches[0];
         dragIdx = idx;
         entry.classList.add('dragging');
@@ -2516,7 +2555,7 @@ class CoverMediaCardEditor extends HTMLElement {
 
       const mkLabel = (t) => Object.assign(document.createElement('div'), { className: 'body-label', textContent: t });
 
-      // Entity — exclude other already-configured players
+      // Entity: exclude other already-configured players
       const otherEntities = players.filter((_, j) => j !== idx).map(p => p.entity);
       const entityForm = document.createElement('ha-form');
       entityForm.schema = [{ name: 'entity', selector: { entity: {
@@ -2530,7 +2569,7 @@ class CoverMediaCardEditor extends HTMLElement {
         const arr = [...players]; arr[idx] = { ...arr[idx], entity }; save(arr);
       });
 
-      // Display name — _fire only (no re-render) to preserve focus; update row label live
+      // Display name: _fire only (no re-render) to preserve focus; update row label live
       const nameForm = document.createElement('ha-form');
       nameForm.schema = [{ name: 'name', selector: { text: {} } }];
       nameForm.data   = { name: player.name || '' };
@@ -2545,7 +2584,7 @@ class CoverMediaCardEditor extends HTMLElement {
         this._fire({ ...this._config, players: arr });
       });
 
-      // Group members — filter to players from the same integration, exclude own entity.
+      // Group members: filter to players from the same integration, exclude own entity.
       // Falls back to all media_players if platform info is unavailable.
       const ownPlatform = this._hass?.entities?.[player.entity]?.platform;
       const alreadyConfigured = new Set(player.group_members || []);

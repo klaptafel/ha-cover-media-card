@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/). Versions before 0.5.0 are not retroactively documented: see git history / GitHub releases for those.
 
+## [Unreleased]
+
+### Fixed
+- The "Open your Home Assistant instance" HACS badge in the README used an invalid category (`dashboard`), which made the link error out; now uses `plugin`, the correct HACS category for a Lovelace card.
+- `_mkNumberRow` treated an explicitly entered `0` (e.g. `art_padding: 0`) as falsy and silently substituted the field's default value instead.
+- `_rendered` was set to `true` before the cached DOM references (`_el`) were actually populated; an exception partway through the first render could leave the card permanently crash-looping on every `hass` update instead of retrying a full render.
+
+### Added
+- `window.customCards` double-registration guard, matching the existing `customElements.define` guard.
+
+### Changed
+- The watched-entity list used to detect relevant `hass` changes is now built once in `setConfig()` instead of rebuilt on every `hass` update.
+- `_activeButtons()` is now computed at most once per `hass` tick (previously could be computed twice, once via `_evalVisible()` and once via `_updateCard()`, if both triggered in the same tick).
+- The overlay show/hide DOM-toggling repeated across `_showCtrl`/`_hideCtrl`/`_flashStatus`/`_updateConfigError`/`_updateCard` consolidated into shared `_showOverlayEls()`/`_hideOverlayEls()` helpers; no behavior change.
+
 ## [0.6.0] - 2026-07-13
 
 This release is mostly polish: the card is now fully available in English and Dutch, and editor fields no longer lose focus while you're typing in them. Fit mode gains new options to inset the artwork with padding, rounded corners, and a soft shadow instead of always filling the card edge-to-edge. The card also now fits properly into Home Assistant's Sections dashboards (full width, automatic height).

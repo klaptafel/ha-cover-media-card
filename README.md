@@ -29,7 +29,7 @@ With YAML you can also configure:
 
 ## Installation
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=klaptafel&repository=ha-cover-media-card&category=dashboard)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=klaptafel&repository=ha-cover-media-card&category=plugin)
 
 1. Go to **HACS** → three-dot menu → **Custom repositories**.
 2. Enter `https://github.com/klaptafel/ha-cover-media-card`, category **Dashboard**, click **Add**.
