@@ -2,7 +2,9 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/). Versions before 0.5.0 are not retroactively documented: see git history / GitHub releases for those.
 
-## [Unreleased]
+## [0.6.1] - 2026-07-14
+
+Fixes a rare crash-loop risk, a bug where entering 0 in a number field (like art padding) silently reverted to the default, and a broken "Open in HACS" badge link. Also some internal cleanup with no visible effect.
 
 ### Fixed
 - The "Open your Home Assistant instance" HACS badge in the README used an invalid category (`dashboard`), which made the link error out; now uses `plugin`, the correct HACS category for a Lovelace card.
