@@ -88,7 +88,7 @@
  * in HA for time-based visibility.
  */
 
-const CARD_VERSION = '0.6.1';
+const CARD_VERSION = '0.6.2';
 
 const LONG_PRESS_MS   = 500;   // long press → more-info
 const PENDING_MS      = 2000;  // optimistic toggle pending window
@@ -1815,6 +1815,14 @@ class CoverMediaCardEditor extends HTMLElement {
     // of them.
     if (this._lastFiredConfig && deepEqual(config, this._lastFiredConfig)) return;
     this._config = _normalizeConfig(config);
+    // While a field is actively focused, don't destructively rebuild the
+    // tab (see the focusin/focusout listeners in _init()) -- accept the
+    // echoed config into _config silently and let the next natural render
+    // (blur, tab switch, add/delete) pick it up already up to date. This
+    // covers echoes the deepEqual check above doesn't catch, without
+    // needing to pin down exactly why a given round-trip didn't compare
+    // equal.
+    if (this._focusedInput) return;
     this._renderTab();
   }
 
@@ -1861,6 +1869,17 @@ class CoverMediaCardEditor extends HTMLElement {
   _init() {
     this._built = true;
     const root  = this.shadowRoot;
+
+    // Tracks whether a text/number input somewhere in this editor (possibly
+    // nested inside a <ha-form>'s own shadow root -- focusin/focusout are
+    // composed and cross shadow boundaries) currently has focus. Used by
+    // setConfig() to skip its destructive full re-render while the user is
+    // actively typing: an echoed config-changed round-trip doesn't always
+    // deep-equal exactly what we fired (e.g. after a host/YAML round-trip),
+    // and rebuilding the whole tab from scratch on every keystroke replaces
+    // the focused element, losing focus and cursor position.
+    root.addEventListener('focusin',  () => { this._focusedInput = true; });
+    root.addEventListener('focusout', () => { this._focusedInput = false; });
 
     root.appendChild(Object.assign(document.createElement('style'), { textContent: `
       :host { display: block; }
@@ -2764,17 +2783,29 @@ class CoverMediaCardEditor extends HTMLElement {
 
         const mkLabel = (t) => Object.assign(document.createElement('div'), { className: 'body-label', textContent: t });
 
-        const appearanceForm = document.createElement('ha-form');
-        appearanceForm.className = 'btn-form';
-        appearanceForm.schema    = [
-          { name: 'icon',  selector: { icon: {} }  },
-          { name: 'label', selector: { text: {} } },
-        ];
-        appearanceForm.data         = item;
-        appearanceForm.computeLabel = (s) => ({ icon: tr.field_icon, label: tr.field_label_tooltip }[s.name] ?? s.name);
-        appearanceForm.addEventListener('value-changed', (e) => {
+        // Two separate, single-field forms with minimal `data` (not the
+        // whole button object) -- same pattern as the player name field
+        // above. Passing item's full shape (including tap_action) as
+        // ha-form's `data` was causing the label field to lose focus after
+        // every keystroke; a minimal, schema-matching data object avoids it.
+        const iconForm = document.createElement('ha-form');
+        iconForm.className = 'btn-form';
+        iconForm.schema    = [{ name: 'icon', selector: { icon: {} } }];
+        iconForm.data         = { icon: item.icon || '' };
+        iconForm.computeLabel = () => tr.field_icon;
+        iconForm.addEventListener('value-changed', (e) => {
           const arr = [...buttons]; arr[arrIdx] = { ...arr[arrIdx], ...e.detail.value };
           icon.setAttribute('icon', arr[arrIdx].icon || 'mdi:gesture-tap-button');
+          saveField(arr);
+        });
+
+        const labelForm = document.createElement('ha-form');
+        labelForm.className = 'btn-form';
+        labelForm.schema    = [{ name: 'label', selector: { text: {} } }];
+        labelForm.data         = { label: item.label || '' };
+        labelForm.computeLabel = () => tr.field_label_tooltip;
+        labelForm.addEventListener('value-changed', (e) => {
+          const arr = [...buttons]; arr[arrIdx] = { ...arr[arrIdx], ...e.detail.value };
           label.textContent = arr[arrIdx].label || arr[arrIdx].tap_action?.perform_action || tr.custom_button_fallback;
           saveField(arr);
         });
@@ -2782,7 +2813,7 @@ class CoverMediaCardEditor extends HTMLElement {
         const actionForm = document.createElement('ha-form');
         actionForm.className    = 'btn-form';
         actionForm.schema       = [{ name: 'tap_action', selector: { ui_action: {} } }];
-        actionForm.data         = item;
+        actionForm.data         = { tap_action: item.tap_action };
         actionForm.computeLabel = () => '';
         actionForm.addEventListener('value-changed', (e) => {
           const arr = [...buttons]; arr[arrIdx] = { ...arr[arrIdx], ...e.detail.value };
@@ -2791,7 +2822,7 @@ class CoverMediaCardEditor extends HTMLElement {
         });
 
         body.append(
-          mkLabel(tr.button_header), appearanceForm,
+          mkLabel(tr.button_header), iconForm, labelForm,
           mkLabel(tr.action_header), actionForm,
         );
 

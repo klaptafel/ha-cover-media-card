@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/). Versions before 0.5.0 are not retroactively documented: see git history / GitHub releases for those.
 
+## [0.6.2] - 2026-07-15
+
+Fixes editing a custom button's label/icon, or a player's display name, kicking you out of the text field after every keystroke.
+
+### Fixed
+- Typing in the custom button label/icon fields or a player's display name field could lose focus after each keystroke: the editor's own config-changed echo could trigger a full rebuild of the tab while the field was still focused. Now guarded by tracking whether an input is currently focused before allowing that rebuild.
+
 ## [0.6.1] - 2026-07-14
 
 Fixes a rare crash-loop risk, a bug where entering 0 in a number field (like art padding) silently reverted to the default, and a broken "Open in HACS" badge link. Also some internal cleanup with no visible effect.
