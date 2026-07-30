@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/). Versions before 0.5.0 are not retroactively documented: see git history / GitHub releases for those.
 
+## [Unreleased]
+
+### Fixed
+- With multiple players, the initial buttons row could come up empty on the very first load (pills and title showed fine), only reappearing after switching players and back -- direct user feedback, seen in the iOS companion app with several visibility-conditioned players invisible at once (both game consoles off). The buttons baked into the very first render had no fallback of their own if state/features weren't fully settled yet at that exact moment, unlike every other field, which compares against a previous value and self-corrects. The first render now also runs that same reconciliation pass immediately afterward.
+- Picking which player to switch to when the current one becomes invisible could pick one whose own visibility hadn't been evaluated yet in that same pass, wrongly treating it as visible. With several players invisible at once this could cascade through multiple wrong switches before landing on a genuinely visible one, all before the card had even rendered once. Now decided in a separate pass, after every player's own visibility is already known.
+
 ## [0.6.2] - 2026-07-15
 
 Fixes editing a custom button's label/icon, or a player's display name, kicking you out of the text field after every keystroke.

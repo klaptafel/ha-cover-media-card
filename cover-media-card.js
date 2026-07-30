@@ -549,22 +549,34 @@ class CoverMediaCard extends HTMLElement {
       }
     });
 
-    // Evaluate player visibility conditions
-    let deferredSwitch = -1;
+    // Evaluate player visibility conditions -- every player's own condition
+    // first, in one pass, deciding whether to switch only afterward (found
+    // live, 2026-07-30: deciding "first visible player" *inside* this same
+    // loop, as this used to, could pick a player whose own visibility
+    // hadn't been evaluated yet this same pass, wrongly treating its still-
+    // undefined cache entry as "visible". With several players invisible at
+    // once (e.g. 3 of 5), that could cascade through multiple wrong
+    // _switchPlayer() calls, each recursing back into this same method,
+    // before finally landing on a genuinely visible one -- all of it before
+    // the very first render, where _switchPlayer()'s own _updateCard() call
+    // is a no-op (nothing's been rendered yet to update), making the whole
+    // multi-hop detour pure, easy-to-get-wrong overhead instead of a
+    // correctness requirement).
     this._config.players.forEach((p, i) => {
       if (!p.visibility) return;
       const visible = this._evalConditions(p.visibility, p.entity);
       if (this._playerVisibleCache.get(i) !== visible) {
         this._playerVisibleCache.set(i, visible);
         pillChanged = true;
-        if (!visible && i === this._playerIdx && deferredSwitch === -1) {
-          const first = this._config.players.findIndex((_, j) =>
-            this._playerVisibleCache.get(j) !== false
-          );
-          if (first !== -1 && first !== this._playerIdx) deferredSwitch = first;
-        }
       }
     });
+    let deferredSwitch = -1;
+    if (this._playerVisibleCache.get(this._playerIdx) === false) {
+      const first = this._config.players.findIndex((_, j) =>
+        this._playerVisibleCache.get(j) !== false
+      );
+      if (first !== -1 && first !== this._playerIdx) deferredSwitch = first;
+    }
     if (deferredSwitch !== -1) { this._switchPlayer(deferredSwitch); return; }
 
     if (!this._rendered) return;
@@ -1388,6 +1400,21 @@ class CoverMediaCard extends HTMLElement {
     // every later hass update would hit that unguarded destructure and
     // crash-loop instead of retrying a full _render().
     this._rendered = true;
+    // Found live (2026-07-30, iOS companion app): the buttons row baked into
+    // the shadowRoot.innerHTML above (via _activeButtonsMemo()) has no
+    // fallback of its own -- it's a one-shot write, not a comparison against
+    // a previous value the way every _updateCard() field is. If supported_
+    // features/state genuinely aren't settled yet on this very first hass
+    // push (plausible on a slower WebView, or when _evalVisible()/
+    // _autoSwitch() switch players before _render() ever runs, since both
+    // can fire earlier in the very same set hass() call, see their own
+    // _switchPlayer() call sites), the initial buttons row can end up empty
+    // and nothing re-checks it until a real state field actually changes.
+    // Reconciling immediately here -- using this._lastFeats/etc, still null
+    // from the reset above, so it always finds "changed" on the very first
+    // pass -- fixes that same-tick instead of leaving it to chance on a
+    // later one; harmless if the initial write was already correct.
+    this._updateCard();
     this._applyDefaultRatio();
 
     // Recalculate fit sizing whenever the card is resized (e.g. in popups).
