@@ -88,7 +88,7 @@
  * in HA for time-based visibility.
  */
 
-const CARD_VERSION = '0.6.2';
+const CARD_VERSION = '0.6.3';
 
 const LONG_PRESS_MS   = 500;   // long press → more-info
 const PENDING_MS      = 2000;  // optimistic toggle pending window

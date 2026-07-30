@@ -2,7 +2,9 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/). Versions before 0.5.0 are not retroactively documented: see git history / GitHub releases for those.
 
-## [Unreleased]
+## [0.6.3] - 2026-07-30
+
+This release fixes a bug where the buttons for the initial player could be missing right after loading the card, when several players were configured with visibility conditions and more than one of them was unavailable at the same time (e.g. two game consoles both off). Switching players and back used to work around it; that's no longer necessary.
 
 ### Fixed
 - With multiple players, the initial buttons row could come up empty on the very first load (pills and title showed fine), only reappearing after switching players and back -- direct user feedback, seen in the iOS companion app with several visibility-conditioned players invisible at once (both game consoles off). The buttons baked into the very first render had no fallback of their own if state/features weren't fully settled yet at that exact moment, unlike every other field, which compares against a previous value and self-corrects. The first render now also runs that same reconciliation pass immediately afterward.
