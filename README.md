@@ -1,5 +1,5 @@
 [![Made for Home Assistant](https://img.shields.io/badge/Made%20for-Home%20Assistant-blue?style=for-the-badge&logo=homeassistant)](https://www.home-assistant.io/)
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge)](https://github.com/hacs/integration)
+[![marketplace_badge](https://img.shields.io/badge/Marketplace-Custom-orange.svg?style=for-the-badge)](https://contributors.home-assistant.io/marketplace/)
 
 # Cover Media Card: Home Assistant media player card
 
@@ -29,9 +29,9 @@ With YAML you can also configure:
 
 ## Installation
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=klaptafel&repository=ha-cover-media-card&category=plugin)
+[![Open your Home Assistant instance and open a repository inside the Marketplace.](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/marketplace_repository/?owner=klaptafel&repository=ha-cover-media-card&category=plugin)
 
-1. Go to **HACS** → three-dot menu → **Custom repositories**.
+1. Go to **Marketplace** → three-dot menu → **Custom repositories**.
 2. Enter `https://github.com/klaptafel/ha-cover-media-card`, category **Dashboard**, click **Add**.
 3. Find **Cover Media Card** and click **Download**.
 
